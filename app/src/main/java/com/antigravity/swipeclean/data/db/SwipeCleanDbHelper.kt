@@ -6,27 +6,39 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.antigravity.swipeclean.data.model.CleanStats
 import com.antigravity.swipeclean.data.model.MediaItem
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.antigravity.swipeclean.data.model.MediaKey
+import com.antigravity.swipeclean.util.BinStatusCalculator
+import com.antigravity.swipeclean.util.StreakCalculator
+import java.time.LocalDate
+
+data class UndoEntry(
+    val mediaId: Long,
+    val isVideo: Boolean,
+    val action: String
+) {
+    val mediaKey: MediaKey get() = MediaKey(mediaId, isVideo)
+}
 
 class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
     companion object {
         const val DATABASE_NAME = "swipeclean.db"
-        const val DATABASE_VERSION = 2
+        const val DATABASE_VERSION = 3
+        const val MAX_UNDO_ROWS = 200
+        private const val SQL_PARAM_CHUNK = 400
 
         const val TABLE_REVIEWED = "reviewed_items"
         const val COL_MEDIA_ID = "media_id"
+        const val COL_IS_VIDEO = "is_video"
         const val COL_URI = "uri_string"
-        const val COL_STATUS = "status" // "KEPT", "TRASHED", "BOOKMARKED"
+        const val COL_STATUS = "status"
         const val COL_SWIPED_AT = "swiped_at"
         const val COL_SIZE_BYTES = "size_bytes"
-        const val COL_IS_VIDEO = "is_video"
 
         const val TABLE_UNDO = "undo_stack"
         const val COL_UNDO_ID = "id"
         const val COL_UNDO_MEDIA_ID = "media_id"
+        const val COL_UNDO_IS_VIDEO = "is_video"
         const val COL_UNDO_ACTION = "action"
         const val COL_UNDO_TIMESTAMP = "timestamp"
 
@@ -36,7 +48,12 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
 
         const val STATUS_KEPT = "KEPT"
         const val STATUS_TRASHED = "TRASHED"
-        const val STATUS_BOOKMARKED = "BOOKMARKED"
+        const val STATUS_LATER = "LATER"
+
+        private const val META_LAST_ACTIVE_DATE = "last_active_date"
+        private const val META_STREAK_DAYS = "streak_days"
+        private const val META_FREED_COUNT = "lifetime_freed_count"
+        private const val META_FREED_BYTES = "lifetime_freed_bytes"
 
         @Volatile
         private var instance: SwipeCleanDbHelper? = null
@@ -52,12 +69,13 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS $TABLE_REVIEWED (
-                $COL_MEDIA_ID INTEGER PRIMARY KEY,
+                $COL_MEDIA_ID INTEGER NOT NULL,
+                $COL_IS_VIDEO INTEGER NOT NULL,
                 $COL_URI TEXT NOT NULL,
                 $COL_STATUS TEXT NOT NULL,
                 $COL_SWIPED_AT INTEGER NOT NULL,
                 $COL_SIZE_BYTES INTEGER NOT NULL,
-                $COL_IS_VIDEO INTEGER NOT NULL
+                PRIMARY KEY ($COL_MEDIA_ID, $COL_IS_VIDEO)
             )
             """.trimIndent()
         )
@@ -67,6 +85,7 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
             CREATE TABLE IF NOT EXISTS $TABLE_UNDO (
                 $COL_UNDO_ID INTEGER PRIMARY KEY AUTOINCREMENT,
                 $COL_UNDO_MEDIA_ID INTEGER NOT NULL,
+                $COL_UNDO_IS_VIDEO INTEGER NOT NULL DEFAULT 0,
                 $COL_UNDO_ACTION TEXT NOT NULL,
                 $COL_UNDO_TIMESTAMP INTEGER NOT NULL
             )
@@ -94,47 +113,59 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
                 """.trimIndent()
             )
         }
+        if (oldVersion < 3) {
+            db.beginTransaction()
+            try {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS ${TABLE_REVIEWED}_v3 (
+                        $COL_MEDIA_ID INTEGER NOT NULL,
+                        $COL_IS_VIDEO INTEGER NOT NULL,
+                        $COL_URI TEXT NOT NULL,
+                        $COL_STATUS TEXT NOT NULL,
+                        $COL_SWIPED_AT INTEGER NOT NULL,
+                        $COL_SIZE_BYTES INTEGER NOT NULL,
+                        PRIMARY KEY ($COL_MEDIA_ID, $COL_IS_VIDEO)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    INSERT OR REPLACE INTO ${TABLE_REVIEWED}_v3
+                        ($COL_MEDIA_ID, $COL_IS_VIDEO, $COL_URI, $COL_STATUS, $COL_SWIPED_AT, $COL_SIZE_BYTES)
+                    SELECT $COL_MEDIA_ID, $COL_IS_VIDEO, $COL_URI,
+                        CASE WHEN $COL_STATUS = 'BOOKMARKED' THEN '$STATUS_LATER' ELSE $COL_STATUS END,
+                        $COL_SWIPED_AT, $COL_SIZE_BYTES
+                    FROM $TABLE_REVIEWED
+                    """.trimIndent()
+                )
+                db.execSQL("DROP TABLE $TABLE_REVIEWED")
+                db.execSQL("ALTER TABLE ${TABLE_REVIEWED}_v3 RENAME TO $TABLE_REVIEWED")
+
+                db.execSQL("ALTER TABLE $TABLE_UNDO ADD COLUMN $COL_UNDO_IS_VIDEO INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(
+                    "UPDATE $TABLE_UNDO SET $COL_UNDO_ACTION = '$STATUS_LATER' WHERE $COL_UNDO_ACTION = 'BOOKMARKED'"
+                )
+                db.execSQL(
+                    "DELETE FROM $TABLE_UNDO WHERE $COL_UNDO_ID NOT IN (SELECT $COL_UNDO_ID FROM $TABLE_UNDO ORDER BY $COL_UNDO_ID DESC LIMIT $MAX_UNDO_ROWS)"
+                )
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+        }
     }
 
     @Synchronized
-    fun markKept(item: MediaItem) {
-        recordAction(item, STATUS_KEPT)
-        updateStreak()
-    }
-
-    @Synchronized
-    fun markTrashed(item: MediaItem) {
-        recordAction(item, STATUS_TRASHED)
-        updateStreak()
-    }
-
-    @Synchronized
-    fun markBookmarked(item: MediaItem) {
-        recordAction(item, STATUS_BOOKMARKED)
-        updateStreak()
-    }
-
-    private fun recordAction(item: MediaItem, status: String) {
+    fun markKept(item: MediaItem, recordUndo: Boolean = true) {
         val db = writableDatabase
         db.beginTransaction()
         try {
-            val values = ContentValues().apply {
-                put(COL_MEDIA_ID, item.id)
-                put(COL_URI, item.uri.toString())
-                put(COL_STATUS, status)
-                put(COL_SWIPED_AT, System.currentTimeMillis())
-                put(COL_SIZE_BYTES, item.sizeBytes)
-                put(COL_IS_VIDEO, if (item.isVideo) 1 else 0)
+            upsertReviewed(db, item, STATUS_KEPT)
+            if (recordUndo) {
+                pushUndoRow(db, item, STATUS_KEPT)
             }
-            db.insertWithOnConflict(TABLE_REVIEWED, null, values, SQLiteDatabase.CONFLICT_REPLACE)
-
-            val undoValues = ContentValues().apply {
-                put(COL_UNDO_MEDIA_ID, item.id)
-                put(COL_UNDO_ACTION, status)
-                put(COL_UNDO_TIMESTAMP, System.currentTimeMillis())
-            }
-            db.insert(TABLE_UNDO, null, undoValues)
-
+            updateStreakLocked(db)
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -142,71 +173,164 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
     }
 
     @Synchronized
-    fun popUndo(): Pair<Long, String>? {
+    fun markTrashed(item: MediaItem, recordUndo: Boolean = true) {
         val db = writableDatabase
         db.beginTransaction()
         try {
-            val cursor = db.query(
+            upsertReviewed(db, item, STATUS_TRASHED)
+            if (recordUndo) {
+                pushUndoRow(db, item, STATUS_TRASHED)
+            }
+            updateStreakLocked(db)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun markLater(item: MediaItem, recordUndo: Boolean = true) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            upsertReviewed(db, item, STATUS_LATER)
+            if (recordUndo) {
+                pushUndoRow(db, item, STATUS_LATER)
+            }
+            updateStreakLocked(db)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun commitReviewBatch(keptItems: List<MediaItem>, trashedItems: List<MediaItem>) {
+        if (keptItems.isEmpty() && trashedItems.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val now = System.currentTimeMillis()
+            for (item in keptItems) {
+                upsertReviewed(db, item, STATUS_KEPT, now)
+            }
+            for (item in trashedItems) {
+                upsertReviewed(db, item, STATUS_TRASHED, now)
+            }
+            updateStreakLocked(db)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun upsertReviewed(
+        db: SQLiteDatabase,
+        item: MediaItem,
+        status: String,
+        timestampMs: Long = System.currentTimeMillis()
+    ) {
+        val values = ContentValues().apply {
+            put(COL_MEDIA_ID, item.id)
+            put(COL_IS_VIDEO, if (item.isVideo) 1 else 0)
+            put(COL_URI, item.uri.toString())
+            put(COL_STATUS, status)
+            put(COL_SWIPED_AT, timestampMs)
+            put(COL_SIZE_BYTES, item.sizeBytes)
+        }
+        db.insertWithOnConflict(TABLE_REVIEWED, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    private fun pushUndoRow(db: SQLiteDatabase, item: MediaItem, status: String) {
+        val undoValues = ContentValues().apply {
+            put(COL_UNDO_MEDIA_ID, item.id)
+            put(COL_UNDO_IS_VIDEO, if (item.isVideo) 1 else 0)
+            put(COL_UNDO_ACTION, status)
+            put(COL_UNDO_TIMESTAMP, System.currentTimeMillis())
+        }
+        db.insert(TABLE_UNDO, null, undoValues)
+        db.execSQL(
+            """
+            DELETE FROM $TABLE_UNDO
+            WHERE $COL_UNDO_ID NOT IN (
+                SELECT $COL_UNDO_ID FROM $TABLE_UNDO ORDER BY $COL_UNDO_ID DESC LIMIT $MAX_UNDO_ROWS
+            )
+            """.trimIndent()
+        )
+    }
+
+    @Synchronized
+    fun hasUndoHistory(): Boolean {
+        val db = readableDatabase
+        db.rawQuery("SELECT 1 FROM $TABLE_UNDO LIMIT 1", null).use { cursor ->
+            return cursor.moveToFirst()
+        }
+    }
+
+    @Synchronized
+    fun popUndo(): UndoEntry? {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val entry = db.query(
                 TABLE_UNDO,
-                arrayOf(COL_UNDO_ID, COL_UNDO_MEDIA_ID, COL_UNDO_ACTION),
+                arrayOf(COL_UNDO_ID, COL_UNDO_MEDIA_ID, COL_UNDO_IS_VIDEO, COL_UNDO_ACTION),
                 null,
                 null,
                 null,
                 null,
                 "$COL_UNDO_ID DESC",
                 "1"
-            )
-
-            if (!cursor.moveToFirst()) {
-                cursor.close()
-                return null
+            ).use { cursor ->
+                if (!cursor.moveToFirst()) return null
+                val undoId = cursor.getLong(0)
+                val mediaId = cursor.getLong(1)
+                val isVideo = cursor.getInt(2) == 1
+                val action = cursor.getString(3)
+                Triple(undoId, UndoEntry(mediaId, isVideo, action), isVideo)
             }
 
-            val undoId = cursor.getLong(0)
-            val mediaId = cursor.getLong(1)
-            val action = cursor.getString(2)
-            cursor.close()
-
+            val (undoId, undoEntry, isVideo) = entry
+            val isVideoArg = if (isVideo) "1" else "0"
             db.delete(TABLE_UNDO, "$COL_UNDO_ID = ?", arrayOf(undoId.toString()))
-            db.delete(TABLE_REVIEWED, "$COL_MEDIA_ID = ?", arrayOf(mediaId.toString()))
+            db.delete(
+                TABLE_REVIEWED,
+                "$COL_MEDIA_ID = ? AND $COL_IS_VIDEO = ?",
+                arrayOf(undoEntry.mediaId.toString(), isVideoArg)
+            )
 
             db.setTransactionSuccessful()
-            return Pair(mediaId, action)
+            return undoEntry
         } finally {
             db.endTransaction()
         }
     }
 
     @Synchronized
-    fun restoreItem(mediaId: Long) {
+    fun restoreItem(key: MediaKey) {
         val db = writableDatabase
-        db.delete(TABLE_REVIEWED, "$COL_MEDIA_ID = ?", arrayOf(mediaId.toString()))
-        db.delete(TABLE_UNDO, "$COL_UNDO_MEDIA_ID = ?", arrayOf(mediaId.toString()))
+        val args = arrayOf(key.id.toString(), if (key.isVideo) "1" else "0")
+        db.beginTransaction()
+        try {
+            db.delete(TABLE_REVIEWED, "$COL_MEDIA_ID = ? AND $COL_IS_VIDEO = ?", args)
+            db.delete(TABLE_UNDO, "$COL_UNDO_MEDIA_ID = ? AND $COL_UNDO_IS_VIDEO = ?", args)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     @Synchronized
-    fun removeBookmark(mediaId: Long) {
-        val db = writableDatabase
-        db.delete(TABLE_REVIEWED, "$COL_MEDIA_ID = ? AND $COL_STATUS = ?", arrayOf(mediaId.toString(), STATUS_BOOKMARKED))
-    }
-
-    @Synchronized
-    fun deletePermanently(mediaId: Long) {
-        val db = writableDatabase
-        db.delete(TABLE_REVIEWED, "$COL_MEDIA_ID = ?", arrayOf(mediaId.toString()))
-        db.delete(TABLE_UNDO, "$COL_UNDO_MEDIA_ID = ?", arrayOf(mediaId.toString()))
-    }
-
-    @Synchronized
-    fun deletePermanentlyAll(mediaIds: Collection<Long>) {
-        if (mediaIds.isEmpty()) return
+    fun restoreAllKeys(keys: Collection<MediaKey>) {
+        if (keys.isEmpty()) return
         val db = writableDatabase
         db.beginTransaction()
         try {
-            val idStrings = mediaIds.map { it.toString() }.toTypedArray()
-            val placeholders = mediaIds.joinToString(",") { "?" }
-            db.delete(TABLE_REVIEWED, "$COL_MEDIA_ID IN ($placeholders)", idStrings)
-            db.delete(TABLE_UNDO, "$COL_UNDO_MEDIA_ID IN ($placeholders)", idStrings)
+            for (key in keys) {
+                val args = arrayOf(key.id.toString(), if (key.isVideo) "1" else "0")
+                db.delete(TABLE_REVIEWED, "$COL_MEDIA_ID = ? AND $COL_IS_VIDEO = ?", args)
+                db.delete(TABLE_UNDO, "$COL_UNDO_MEDIA_ID = ? AND $COL_UNDO_IS_VIDEO = ?", args)
+            }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -214,72 +338,78 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
     }
 
     @Synchronized
-    fun getAllKeptIds(): Set<Long> {
+    fun recordPermanentDeletion(deletedItems: Collection<MediaItem>) {
+        if (deletedItems.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val prevCount = getMetaLongLocked(db, META_FREED_COUNT)
+            val prevBytes = getMetaLongLocked(db, META_FREED_BYTES)
+            val addedBytes = deletedItems.sumOf { maxOf(0L, it.sizeBytes) }
+
+            setMetaValueLocked(db, META_FREED_COUNT, (prevCount + deletedItems.size).toString())
+            setMetaValueLocked(db, META_FREED_BYTES, (prevBytes + addedBytes).toString())
+
+            for (chunk in deletedItems.chunked(SQL_PARAM_CHUNK)) {
+                for (item in chunk) {
+                    val args = arrayOf(item.id.toString(), if (item.isVideo) "1" else "0")
+                    db.delete(TABLE_REVIEWED, "$COL_MEDIA_ID = ? AND $COL_IS_VIDEO = ?", args)
+                    db.delete(TABLE_UNDO, "$COL_UNDO_MEDIA_ID = ? AND $COL_UNDO_IS_VIDEO = ?", args)
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun getAllReviewedKeys(): Set<MediaKey> {
         val db = readableDatabase
-        val result = mutableSetOf<Long>()
+        val result = HashSet<MediaKey>()
         db.query(
             TABLE_REVIEWED,
-            arrayOf(COL_MEDIA_ID),
+            arrayOf(COL_MEDIA_ID, COL_IS_VIDEO),
+            null,
+            null,
+            null,
+            null,
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(MediaKey(cursor.getLong(0), cursor.getInt(1) == 1))
+            }
+        }
+        return result
+    }
+
+    @Synchronized
+    fun getAllLaterKeys(): List<MediaKey> {
+        val db = readableDatabase
+        val result = mutableListOf<MediaKey>()
+        db.query(
+            TABLE_REVIEWED,
+            arrayOf(COL_MEDIA_ID, COL_IS_VIDEO),
             "$COL_STATUS = ?",
-            arrayOf(STATUS_KEPT),
+            arrayOf(STATUS_LATER),
             null,
             null,
-            null
+            "$COL_SWIPED_AT DESC"
         ).use { cursor ->
             while (cursor.moveToNext()) {
-                result.add(cursor.getLong(0))
+                result.add(MediaKey(cursor.getLong(0), cursor.getInt(1) == 1))
             }
         }
         return result
     }
 
     @Synchronized
-    fun getAllBookmarkedIds(): Set<Long> {
+    fun getAllTrashedMap(): Map<MediaKey, Long> {
         val db = readableDatabase
-        val result = mutableSetOf<Long>()
+        val result = LinkedHashMap<MediaKey, Long>()
         db.query(
             TABLE_REVIEWED,
-            arrayOf(COL_MEDIA_ID),
-            "$COL_STATUS = ?",
-            arrayOf(STATUS_BOOKMARKED),
-            null,
-            null,
-            null
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                result.add(cursor.getLong(0))
-            }
-        }
-        return result
-    }
-
-    @Synchronized
-    fun getAllReviewedIds(): Set<Long> {
-        val db = readableDatabase
-        val result = mutableSetOf<Long>()
-        db.query(
-            TABLE_REVIEWED,
-            arrayOf(COL_MEDIA_ID),
-            null,
-            null,
-            null,
-            null,
-            null
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                result.add(cursor.getLong(0))
-            }
-        }
-        return result
-    }
-
-    @Synchronized
-    fun getAllTrashedMap(): Map<Long, Long> {
-        val db = readableDatabase
-        val result = mutableMapOf<Long, Long>()
-        db.query(
-            TABLE_REVIEWED,
-            arrayOf(COL_MEDIA_ID, COL_SWIPED_AT),
+            arrayOf(COL_MEDIA_ID, COL_IS_VIDEO, COL_SWIPED_AT),
             "$COL_STATUS = ?",
             arrayOf(STATUS_TRASHED),
             null,
@@ -287,39 +417,18 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
             "$COL_SWIPED_AT DESC"
         ).use { cursor ->
             while (cursor.moveToNext()) {
-                result[cursor.getLong(0)] = cursor.getLong(1)
+                val key = MediaKey(cursor.getLong(0), cursor.getInt(1) == 1)
+                result[key] = cursor.getLong(2)
             }
         }
         return result
     }
 
     @Synchronized
-    fun getExpiredTrashedIds(expirationDays: Int = 7): List<Long> {
-        val db = readableDatabase
-        val threshold = System.currentTimeMillis() - (expirationDays.toLong() * 24 * 60 * 60 * 1000)
-        val result = mutableListOf<Long>()
-        db.query(
-            TABLE_REVIEWED,
-            arrayOf(COL_MEDIA_ID),
-            "$COL_STATUS = ? AND $COL_SWIPED_AT <= ?",
-            arrayOf(STATUS_TRASHED, threshold.toString()),
-            null,
-            null,
-            null
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                result.add(cursor.getLong(0))
-            }
-        }
-        return result
-    }
-
-    @Synchronized
-    fun getStats(): CleanStats {
+    fun getStats(nowMs: Long = System.currentTimeMillis()): CleanStats {
         val db = readableDatabase
         var keptCount = 0
-        var trashedCount = 0
-        var bookmarkedCount = 0
+        var laterCount = 0
         var binCount = 0
         var binTotalBytes = 0L
 
@@ -338,68 +447,87 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
                 when (status) {
                     STATUS_KEPT -> keptCount = count
                     STATUS_TRASHED -> {
-                        trashedCount = count
                         binCount = count
                         binTotalBytes = sumSize
                     }
-                    STATUS_BOOKMARKED -> bookmarkedCount = count
+                    STATUS_LATER -> laterCount = count
                 }
             }
         }
 
-        val streak = getStreakDays()
+        val threshold = nowMs - (BinStatusCalculator.RETENTION_DAYS.toLong() * 24L * 60L * 60L * 1000L)
+        var expiredCount = 0
+        db.rawQuery(
+            "SELECT COUNT(*) FROM $TABLE_REVIEWED WHERE $COL_STATUS = ? AND $COL_SWIPED_AT <= ?",
+            arrayOf(STATUS_TRASHED, threshold.toString())
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                expiredCount = cursor.getInt(0)
+            }
+        }
+
+        val freedCount = getMetaLongLocked(db, META_FREED_COUNT).toInt()
+        val freedBytes = getMetaLongLocked(db, META_FREED_BYTES)
+        val lastDateStr = getMetaStringLocked(db, META_LAST_ACTIVE_DATE)
+        val storedStreak = getMetaStringLocked(db, META_STREAK_DAYS)?.toIntOrNull() ?: 0
+        val visibleStreak = StreakCalculator.visibleStreak(lastDateStr, storedStreak, LocalDate.now())
 
         return CleanStats(
             totalKeptCount = keptCount,
-            totalTrashedCount = trashedCount,
-            totalBookmarkedCount = bookmarkedCount,
             binItemCount = binCount,
             binTotalSizeBytes = binTotalBytes,
-            streakDays = streak
+            expiredBinCount = expiredCount,
+            totalLaterCount = laterCount,
+            lifetimeDeletedCount = freedCount,
+            lifetimeFreedBytes = freedBytes,
+            streakDays = visibleStreak
         )
     }
 
-    private fun updateStreak() {
-        val db = writableDatabase
-        val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-        val cursor = db.query(TABLE_META, arrayOf(COL_META_VAL), "$COL_META_KEY = ?", arrayOf("last_active_date"), null, null, null)
-        val lastDate = if (cursor.moveToFirst()) cursor.getString(0) else null
-        cursor.close()
-
-        var currentStreak = getStreakDays()
-        if (lastDate == null) {
-            currentStreak = 1
-        } else if (lastDate != todayStr) {
-            val lastMillis = SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(lastDate)?.time ?: 0L
-            val todayMillis = SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(todayStr)?.time ?: 0L
-            val diffDays = ((todayMillis - lastMillis) / (1000 * 60 * 60 * 24)).toInt()
-            currentStreak = if (diffDays == 1) currentStreak + 1 else 1
-        }
-
-        val v1 = ContentValues().apply {
-            put(COL_META_KEY, "last_active_date")
-            put(COL_META_VAL, todayStr)
-        }
-        db.insertWithOnConflict(TABLE_META, null, v1, SQLiteDatabase.CONFLICT_REPLACE)
-
-        val v2 = ContentValues().apply {
-            put(COL_META_KEY, "streak_days")
-            put(COL_META_VAL, currentStreak.toString())
-        }
-        db.insertWithOnConflict(TABLE_META, null, v2, SQLiteDatabase.CONFLICT_REPLACE)
+    private fun updateStreakLocked(db: SQLiteDatabase) {
+        val lastDateStr = getMetaStringLocked(db, META_LAST_ACTIVE_DATE)
+        val storedStreak = getMetaStringLocked(db, META_STREAK_DAYS)?.toIntOrNull() ?: 0
+        val (newDateStr, newStreak) = StreakCalculator.recordActivity(lastDateStr, storedStreak, LocalDate.now())
+        setMetaValueLocked(db, META_LAST_ACTIVE_DATE, newDateStr)
+        setMetaValueLocked(db, META_STREAK_DAYS, newStreak.toString())
     }
 
-    private fun getStreakDays(): Int {
-        val db = readableDatabase
-        val cursor = db.query(TABLE_META, arrayOf(COL_META_VAL), "$COL_META_KEY = ?", arrayOf("streak_days"), null, null, null)
-        val streak = if (cursor.moveToFirst()) cursor.getString(0).toIntOrNull() ?: 1 else 1
-        cursor.close()
-        return streak
+    private fun getMetaStringLocked(db: SQLiteDatabase, key: String): String? {
+        db.query(
+            TABLE_META,
+            arrayOf(COL_META_VAL),
+            "$COL_META_KEY = ?",
+            arrayOf(key),
+            null,
+            null,
+            null
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }
+
+    private fun getMetaLongLocked(db: SQLiteDatabase, key: String): Long {
+        return getMetaStringLocked(db, key)?.toLongOrNull() ?: 0L
+    }
+
+    private fun setMetaValueLocked(db: SQLiteDatabase, key: String, value: String) {
+        val values = ContentValues().apply {
+            put(COL_META_KEY, key)
+            put(COL_META_VAL, value)
+        }
+        db.insertWithOnConflict(TABLE_META, null, values, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
     @Synchronized
     fun resetKeptHistory() {
         val db = writableDatabase
-        db.delete(TABLE_REVIEWED, "$COL_STATUS = ?", arrayOf(STATUS_KEPT))
+        db.beginTransaction()
+        try {
+            db.delete(TABLE_REVIEWED, "$COL_STATUS = ?", arrayOf(STATUS_KEPT))
+            db.delete(TABLE_UNDO, "$COL_UNDO_ACTION = ?", arrayOf(STATUS_KEPT))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 }

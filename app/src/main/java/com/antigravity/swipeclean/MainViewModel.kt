@@ -5,22 +5,32 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.antigravity.swipeclean.data.db.SwipeCleanDbHelper
-import com.antigravity.swipeclean.data.model.AlbumGroup
 import com.antigravity.swipeclean.data.model.CleanStats
 import com.antigravity.swipeclean.data.model.MediaItem
+import com.antigravity.swipeclean.data.model.MediaKey
 import com.antigravity.swipeclean.data.model.MonthProgress
+import com.antigravity.swipeclean.data.model.QuickCleanCategory
+import com.antigravity.swipeclean.data.model.QuickCleanGroup
 import com.antigravity.swipeclean.data.model.SwipeAction
 import com.antigravity.swipeclean.data.model.TrashedItem
 import com.antigravity.swipeclean.data.repository.MediaRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = MediaRepository(application)
     private val dbHelper = SwipeCleanDbHelper.getInstance(application)
+    private val dbDispatcher = Dispatchers.IO.limitedParallelism(1)
 
     private val _mediaDeck = MutableStateFlow<List<MediaItem>>(emptyList())
     val mediaDeck: StateFlow<List<MediaItem>> = _mediaDeck.asStateFlow()
@@ -28,32 +38,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _monthProgressList = MutableStateFlow<List<MonthProgress>>(emptyList())
     val monthProgressList: StateFlow<List<MonthProgress>> = _monthProgressList.asStateFlow()
 
+    private val _quickCleanGroups = MutableStateFlow<List<QuickCleanGroup>>(emptyList())
+    val quickCleanGroups: StateFlow<List<QuickCleanGroup>> = _quickCleanGroups.asStateFlow()
+
     private val _onThisDayList = MutableStateFlow<List<MediaItem>>(emptyList())
     val onThisDayList: StateFlow<List<MediaItem>> = _onThisDayList.asStateFlow()
 
-    private val _bookmarkedList = MutableStateFlow<List<MediaItem>>(emptyList())
-    val bookmarkedList: StateFlow<List<MediaItem>> = _bookmarkedList.asStateFlow()
+    private val _laterList = MutableStateFlow<List<MediaItem>>(emptyList())
+    val laterList: StateFlow<List<MediaItem>> = _laterList.asStateFlow()
 
     private val _trashedList = MutableStateFlow<List<TrashedItem>>(emptyList())
     val trashedList: StateFlow<List<TrashedItem>> = _trashedList.asStateFlow()
 
-    private val _albumGroups = MutableStateFlow<List<AlbumGroup>>(emptyList())
-    val albumGroups: StateFlow<List<AlbumGroup>> = _albumGroups.asStateFlow()
-
-    private val _selectedGroup = MutableStateFlow<AlbumGroup?>(null)
-    val selectedGroup: StateFlow<AlbumGroup?> = _selectedGroup.asStateFlow()
-
-    private val _activeDeckTitle = MutableStateFlow("All Photos & Videos")
+    private val _activeDeckKey = MutableStateFlow<String?>("ALL")
+    private val _activeDeckTitle = MutableStateFlow("All items")
     val activeDeckTitle: StateFlow<String> = _activeDeckTitle.asStateFlow()
 
-    // Items staged for deletion in current session before final review
     private val _stagedForDeletion = MutableStateFlow<List<MediaItem>>(emptyList())
     val stagedForDeletion: StateFlow<List<MediaItem>> = _stagedForDeletion.asStateFlow()
 
     private val _showReviewDeletions = MutableStateFlow(false)
     val showReviewDeletions: StateFlow<Boolean> = _showReviewDeletions.asStateFlow()
 
-    private val _stats = MutableStateFlow(CleanStats(0, 0, 0, 0, 0L))
+    private val _stats = MutableStateFlow(CleanStats())
     val stats: StateFlow<CleanStats> = _stats.asStateFlow()
 
     private val _isLoading = MutableStateFlow(true)
@@ -65,83 +72,126 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _inspectItem = MutableStateFlow<MediaItem?>(null)
     val inspectItem: StateFlow<MediaItem?> = _inspectItem.asStateFlow()
 
-    private val mediaCache = mutableMapOf<Long, MediaItem>()
-    private val sessionActionStack = java.util.ArrayDeque<SwipeAction>()
+    private val _toastEvents = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val toastEvents: SharedFlow<String> = _toastEvents.asSharedFlow()
 
-    fun loadData(groupKey: String? = null) {
+    private val sessionActionStack = ArrayDeque<SwipeAction>()
+    private var inFlightKeys = HashSet<MediaKey>()
+    private var cachedReviewedKeys = HashSet<MediaKey>()
+
+    init {
+        repository.startObserving()
+    }
+
+    override fun onCleared() {
+        repository.stopObserving()
+        super.onCleared()
+    }
+
+    fun loadData(
+        groupKey: String? = _activeDeckKey.value,
+        forceLibraryScan: Boolean = false
+    ) {
+        _activeDeckKey.value = groupKey
         viewModelScope.launch {
             _isLoading.value = true
 
-            val deck = repository.loadAllMedia(groupKey)
-            deck.forEach { mediaCache[it.id] = it }
+            val allItems = repository.getLibrary(forceRefresh = forceLibraryScan)
+            val (reviewedKeys, laterKeys, trashedMap, statsSnapshot, hasDbUndo) =
+                withContext(dbDispatcher) {
+                    SnapshotTuple(
+                        reviewed = dbHelper.getAllReviewedKeys(),
+                        later = dbHelper.getAllLaterKeys(),
+                        trashed = dbHelper.getAllTrashedMap(),
+                        stats = dbHelper.getStats(),
+                        hasUndo = dbHelper.hasUndoHistory()
+                    )
+                }
+
+            val stagedKeys = _stagedForDeletion.value.map { it.mediaKey }.toSet()
+            cachedReviewedKeys = reviewedKeys.toHashSet()
+
+            val effectiveExcluded = reviewedKeys + stagedKeys
+            val deck = repository.computeDeck(allItems, groupKey, effectiveExcluded)
+            val months = repository.buildMonthProgressList(allItems, reviewedKeys)
+            val unreviewed = allItems.filter { !effectiveExcluded.contains(it.mediaKey) }
+            val onThisDay = repository.buildOnThisDay(unreviewed)
+            val quickGroups = repository.buildQuickCleanGroups(unreviewed)
+            val later = repository.buildLaterList(allItems, laterKeys)
+            val trashed = repository.buildTrashedList(allItems, trashedMap)
+
             _mediaDeck.value = deck
-
-            val months = repository.loadMonthProgressList()
             _monthProgressList.value = months
-
-            val onThisDay = repository.loadOnThisDayMedia()
             _onThisDayList.value = onThisDay
-
-            val bookmarks = repository.loadBookmarkedMedia()
-            _bookmarkedList.value = bookmarks
-
-            val trashed = repository.loadTrashedItems()
-            trashed.forEach { mediaCache[it.mediaItem.id] = it.mediaItem }
+            _quickCleanGroups.value = quickGroups
+            _laterList.value = later
             _trashedList.value = trashed
-
-            val groups = repository.loadAlbumGroups()
-            _albumGroups.value = groups
-
-            if (_selectedGroup.value == null && groups.isNotEmpty()) {
-                _selectedGroup.value = groups.first()
-            }
-
-            _stats.value = dbHelper.getStats()
+            _stats.value = statsSnapshot
+            _canUndo.value = sessionActionStack.isNotEmpty() || hasDbUndo
+            inFlightKeys.clear()
             _isLoading.value = false
+        }
+    }
+
+    fun onAppResumed() {
+        if (repository.consumeDirty()) {
+            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = true)
+        } else {
+            viewModelScope.launch {
+                val statsSnapshot = withContext(dbDispatcher) { dbHelper.getStats() }
+                _stats.value = statsSnapshot
+            }
         }
     }
 
     fun startMonthDeck(monthKey: String, monthDisplay: String) {
         _activeDeckTitle.value = monthDisplay
-        loadData(monthKey)
+        loadData(groupKey = monthKey, forceLibraryScan = false)
+    }
+
+    fun startQuickCleanDeck(category: QuickCleanCategory) {
+        _activeDeckTitle.value = category.title
+        loadData(groupKey = category.key, forceLibraryScan = false)
     }
 
     fun startOnThisDayDeck() {
-        _activeDeckTitle.value = "On This Day"
-        viewModelScope.launch {
-            _isLoading.value = true
-            val items = repository.loadOnThisDayMedia()
-            items.forEach { mediaCache[it.id] = it }
-            _mediaDeck.value = items
-            _isLoading.value = false
-        }
-    }
-
-    fun selectGroup(group: AlbumGroup) {
-        _selectedGroup.value = group
-        _activeDeckTitle.value = group.displayName
-        loadData(group.key)
+        _activeDeckTitle.value = "On this day"
+        loadData(groupKey = "ON_THIS_DAY", forceLibraryScan = false)
     }
 
     fun swipeRight(item: MediaItem) {
-        viewModelScope.launch {
-            sessionActionStack.addFirst(SwipeAction(item, SwipeCleanDbHelper.STATUS_KEPT, System.currentTimeMillis()))
-            dbHelper.markKept(item)
-            _mediaDeck.value = _mediaDeck.value.filter { it.id != item.id }
-            _canUndo.value = true
-            _stats.value = dbHelper.getStats()
-            refreshMonthProgress()
+        val key = item.mediaKey
+        if (!inFlightKeys.add(key) || _mediaDeck.value.none { it.mediaKey == key }) return
 
-            if (_mediaDeck.value.isEmpty() && _stagedForDeletion.value.isNotEmpty()) {
-                _showReviewDeletions.value = true
+        sessionActionStack.addFirst(SwipeAction(item, SwipeCleanDbHelper.STATUS_KEPT, isStagedOnly = false))
+        _mediaDeck.value = _mediaDeck.value.filter { it.mediaKey != key }
+        cachedReviewedKeys.add(key)
+        adjustMonthProgress(item.monthYearKey, +1)
+        removeFromDerivedQuickLists(key)
+        _canUndo.value = true
+
+        if (_mediaDeck.value.isEmpty() && _stagedForDeletion.value.isNotEmpty()) {
+            _showReviewDeletions.value = true
+        }
+
+        viewModelScope.launch {
+            val (updatedStats, hasUndo) = withContext(dbDispatcher) {
+                dbHelper.markKept(item)
+                dbHelper.getStats() to dbHelper.hasUndoHistory()
             }
+            _stats.value = updatedStats
+            _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
         }
     }
 
     fun swipeLeft(item: MediaItem) {
-        sessionActionStack.addFirst(SwipeAction(item, SwipeCleanDbHelper.STATUS_TRASHED, System.currentTimeMillis()))
-        _mediaDeck.value = _mediaDeck.value.filter { it.id != item.id }
+        val key = item.mediaKey
+        if (!inFlightKeys.add(key) || _mediaDeck.value.none { it.mediaKey == key }) return
+
+        sessionActionStack.addFirst(SwipeAction(item, SwipeCleanDbHelper.STATUS_TRASHED, isStagedOnly = true))
+        _mediaDeck.value = _mediaDeck.value.filter { it.mediaKey != key }
         _stagedForDeletion.value = listOf(item) + _stagedForDeletion.value
+        removeFromDerivedQuickLists(key)
         _canUndo.value = true
 
         if (_mediaDeck.value.isEmpty()) {
@@ -149,15 +199,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun swipeUpBookmark(item: MediaItem) {
+    fun swipeLater(item: MediaItem) {
+        val key = item.mediaKey
+        if (!inFlightKeys.add(key) || _mediaDeck.value.none { it.mediaKey == key }) return
+
+        sessionActionStack.addFirst(SwipeAction(item, SwipeCleanDbHelper.STATUS_LATER, isStagedOnly = false))
+        _mediaDeck.value = _mediaDeck.value.filter { it.mediaKey != key }
+        _laterList.value = listOf(item) + _laterList.value
+        cachedReviewedKeys.add(key)
+        adjustMonthProgress(item.monthYearKey, +1)
+        removeFromDerivedQuickLists(key)
+        _canUndo.value = true
+
+        if (_mediaDeck.value.isEmpty() && _stagedForDeletion.value.isNotEmpty()) {
+            _showReviewDeletions.value = true
+        }
+
         viewModelScope.launch {
-            sessionActionStack.addFirst(SwipeAction(item, SwipeCleanDbHelper.STATUS_BOOKMARKED, System.currentTimeMillis()))
-            dbHelper.markBookmarked(item)
-            _mediaDeck.value = _mediaDeck.value.filter { it.id != item.id }
-            _bookmarkedList.value = listOf(item) + _bookmarkedList.value
-            _canUndo.value = true
-            _stats.value = dbHelper.getStats()
-            refreshMonthProgress()
+            val (updatedStats, hasUndo) = withContext(dbDispatcher) {
+                dbHelper.markLater(item)
+                dbHelper.getStats() to dbHelper.hasUndoHistory()
+            }
+            _stats.value = updatedStats
+            _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
         }
     }
 
@@ -172,145 +236,304 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun commitStagedDeletions(finalDeletions: List<MediaItem>) {
-        viewModelScope.launch {
-            val finalIds = finalDeletions.map { it.id }.toSet()
-            val unselectedItems = _stagedForDeletion.value.filter { !finalIds.contains(it.id) }
-            for (unselected in unselectedItems) {
-                dbHelper.markKept(unselected)
-            }
-
-            for (del in finalDeletions) {
-                dbHelper.markTrashed(del)
-            }
-
-            _trashedList.value = finalDeletions.map { TrashedItem(it, System.currentTimeMillis()) } + _trashedList.value
-            _stagedForDeletion.value = emptyList()
-            sessionActionStack.clear()
+        val stagedSnapshot = _stagedForDeletion.value
+        if (stagedSnapshot.isEmpty()) {
             _showReviewDeletions.value = false
-            _stats.value = dbHelper.getStats()
-            refreshMonthProgress()
+            return
+        }
+
+        val finalKeys = finalDeletions.map { it.mediaKey }.toSet()
+        val keptFromStaged = stagedSnapshot.filter { !finalKeys.contains(it.mediaKey) }
+        val allStagedKeys = stagedSnapshot.map { it.mediaKey }.toSet()
+
+        sessionActionStack.removeAll { it.isStagedOnly && allStagedKeys.contains(it.item.mediaKey) }
+        _stagedForDeletion.value = emptyList()
+        _showReviewDeletions.value = false
+
+        val nowMs = System.currentTimeMillis()
+        _trashedList.value = finalDeletions.map { TrashedItem(it, nowMs) } + _trashedList.value
+
+        for (item in stagedSnapshot) {
+            cachedReviewedKeys.add(item.mediaKey)
+            adjustMonthProgress(item.monthYearKey, +1)
+        }
+
+        viewModelScope.launch {
+            val (updatedStats, hasUndo) = withContext(dbDispatcher) {
+                dbHelper.commitReviewBatch(keptItems = keptFromStaged, trashedItems = finalDeletions)
+                dbHelper.getStats() to dbHelper.hasUndoHistory()
+            }
+            _stats.value = updatedStats
+            _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
         }
     }
 
     fun undo() {
-        viewModelScope.launch {
-            if (sessionActionStack.isNotEmpty()) {
-                val lastAction: SwipeAction = sessionActionStack.removeFirst()
-                val item = lastAction.item
+        if (sessionActionStack.isNotEmpty()) {
+            val lastAction = sessionActionStack.removeFirst()
+            val item = lastAction.item
+            val key = item.mediaKey
+            inFlightKeys.remove(key)
 
-                when (lastAction.actionType) {
-                    SwipeCleanDbHelper.STATUS_TRASHED -> {
-                        _stagedForDeletion.value = _stagedForDeletion.value.filter { it.id != item.id }
-                        _trashedList.value = _trashedList.value.filter { it.mediaItem.id != item.id }
-                        dbHelper.restoreItem(item.id)
-                    }
-                    SwipeCleanDbHelper.STATUS_KEPT -> {
-                        dbHelper.restoreItem(item.id)
-                    }
-                    SwipeCleanDbHelper.STATUS_BOOKMARKED -> {
-                        dbHelper.removeBookmark(item.id)
-                        _bookmarkedList.value = _bookmarkedList.value.filter { it.id != item.id }
-                    }
-                }
-
+            if (lastAction.isStagedOnly) {
+                _stagedForDeletion.value = _stagedForDeletion.value.filter { it.mediaKey != key }
                 _mediaDeck.value = listOf(item) + _mediaDeck.value
-                _canUndo.value = sessionActionStack.isNotEmpty()
-                _stats.value = dbHelper.getStats()
-                refreshMonthProgress()
+                _showReviewDeletions.value = false
+                refreshQuickDerivedGroupsFromLibrary()
+                viewModelScope.launch {
+                    val hasDbUndo = withContext(dbDispatcher) { dbHelper.hasUndoHistory() }
+                    _canUndo.value = sessionActionStack.isNotEmpty() || hasDbUndo
+                }
+                return
+            }
+
+            when (lastAction.actionType) {
+                SwipeCleanDbHelper.STATUS_TRASHED -> {
+                    _trashedList.value = _trashedList.value.filter { it.mediaItem.mediaKey != key }
+                }
+                SwipeCleanDbHelper.STATUS_LATER -> {
+                    _laterList.value = _laterList.value.filter { it.mediaKey != key }
+                }
+            }
+            cachedReviewedKeys.remove(key)
+            adjustMonthProgress(item.monthYearKey, -1)
+            _mediaDeck.value = listOf(item) + _mediaDeck.value
+            _showReviewDeletions.value = false
+            refreshQuickDerivedGroupsFromLibrary()
+
+            viewModelScope.launch {
+                val (updatedStats, hasDbUndo) = withContext(dbDispatcher) {
+                    dbHelper.restoreItem(key)
+                    dbHelper.getStats() to dbHelper.hasUndoHistory()
+                }
+                _stats.value = updatedStats
+                _canUndo.value = sessionActionStack.isNotEmpty() || hasDbUndo
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            val popped = withContext(dbDispatcher) { dbHelper.popUndo() }
+            if (popped == null) {
+                _canUndo.value = false
                 return@launch
             }
 
-            // Fallback to database undo if session stack is exhausted
-            val popped = dbHelper.popUndo() ?: return@launch
-            val (mediaId, action) = popped
-            val item = mediaCache[mediaId]
+            val key = popped.mediaKey
+            inFlightKeys.remove(key)
+            cachedReviewedKeys.remove(key)
 
-            if (item != null) {
-                _mediaDeck.value = listOf(item) + _mediaDeck.value
-            }
+            val allItems = repository.getLibrary(forceRefresh = false)
+            val restoredItem = repository.findByKey(key)
+                ?: allItems.firstOrNull { it.mediaKey == key }
 
-            when (action) {
+            when (popped.action) {
                 SwipeCleanDbHelper.STATUS_TRASHED -> {
-                    _trashedList.value = _trashedList.value.filter { it.mediaItem.id != mediaId }
+                    _trashedList.value = _trashedList.value.filter { it.mediaItem.mediaKey != key }
                 }
-                SwipeCleanDbHelper.STATUS_BOOKMARKED -> {
-                    _bookmarkedList.value = _bookmarkedList.value.filter { it.id != mediaId }
+                SwipeCleanDbHelper.STATUS_LATER -> {
+                    _laterList.value = _laterList.value.filter { it.mediaKey != key }
                 }
             }
 
-            _stats.value = dbHelper.getStats()
-            refreshMonthProgress()
+            if (restoredItem != null) {
+                if (_mediaDeck.value.none { it.mediaKey == key }) {
+                    _mediaDeck.value = listOf(restoredItem) + _mediaDeck.value
+                }
+                adjustMonthProgress(restoredItem.monthYearKey, -1)
+            }
+
+            val (updatedStats, hasDbUndo) = withContext(dbDispatcher) {
+                dbHelper.getStats() to dbHelper.hasUndoHistory()
+            }
+            _stats.value = updatedStats
+            _canUndo.value = sessionActionStack.isNotEmpty() || hasDbUndo
+            refreshQuickDerivedGroupsFromLibrary()
         }
     }
 
-    fun keepFromBookmark(item: MediaItem) {
+    fun keepFromLater(item: MediaItem) {
+        val key = item.mediaKey
+        _laterList.value = _laterList.value.filter { it.mediaKey != key }
+        cachedReviewedKeys.add(key)
+
         viewModelScope.launch {
-            dbHelper.removeBookmark(item.id)
-            dbHelper.markKept(item)
-            _bookmarkedList.value = _bookmarkedList.value.filter { it.id != item.id }
-            _stats.value = dbHelper.getStats()
-            refreshMonthProgress()
+            val (updatedStats, hasUndo) = withContext(dbDispatcher) {
+                dbHelper.markKept(item)
+                dbHelper.getStats() to dbHelper.hasUndoHistory()
+            }
+            _stats.value = updatedStats
+            _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
         }
     }
 
-    fun trashFromBookmark(item: MediaItem) {
+    fun trashFromLater(item: MediaItem) {
+        val key = item.mediaKey
+        _laterList.value = _laterList.value.filter { it.mediaKey != key }
+        _trashedList.value = listOf(TrashedItem(item, System.currentTimeMillis())) + _trashedList.value
+        cachedReviewedKeys.add(key)
+
         viewModelScope.launch {
-            dbHelper.removeBookmark(item.id)
-            dbHelper.markTrashed(item)
-            _bookmarkedList.value = _bookmarkedList.value.filter { it.id != item.id }
-            _trashedList.value = listOf(TrashedItem(item, System.currentTimeMillis())) + _trashedList.value
-            _stats.value = dbHelper.getStats()
-            refreshMonthProgress()
+            val (updatedStats, hasUndo) = withContext(dbDispatcher) {
+                dbHelper.markTrashed(item)
+                dbHelper.getStats() to dbHelper.hasUndoHistory()
+            }
+            _stats.value = updatedStats
+            _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
         }
     }
 
     fun restoreFromBin(trashedItem: TrashedItem) {
+        val item = trashedItem.mediaItem
+        val key = item.mediaKey
+        inFlightKeys.remove(key)
+        cachedReviewedKeys.remove(key)
+        _trashedList.value = _trashedList.value.filter { it.mediaItem.mediaKey != key }
+        adjustMonthProgress(item.monthYearKey, -1)
+
+        if (itemMatchesActiveDeck(item) && _mediaDeck.value.none { it.mediaKey == key }) {
+            _mediaDeck.value = listOf(item) + _mediaDeck.value
+        }
+
         viewModelScope.launch {
-            val id = trashedItem.mediaItem.id
-            dbHelper.restoreItem(id)
-            _trashedList.value = _trashedList.value.filter { it.mediaItem.id != id }
-            _mediaDeck.value = listOf(trashedItem.mediaItem) + _mediaDeck.value
-            _stats.value = dbHelper.getStats()
-            refreshMonthProgress()
+            val (updatedStats, hasUndo) = withContext(dbDispatcher) {
+                dbHelper.restoreItem(key)
+                dbHelper.getStats() to dbHelper.hasUndoHistory()
+            }
+            _stats.value = updatedStats
+            _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
+            refreshQuickDerivedGroupsFromLibrary()
         }
     }
 
     fun restoreAllFromBin() {
+        val currentTrashed = _trashedList.value
+        if (currentTrashed.isEmpty()) return
+
+        val keys = currentTrashed.map { it.mediaItem.mediaKey }
+        for (item in currentTrashed) {
+            val key = item.mediaItem.mediaKey
+            inFlightKeys.remove(key)
+            cachedReviewedKeys.remove(key)
+        }
+        _trashedList.value = emptyList()
+
         viewModelScope.launch {
-            val currentTrashed = _trashedList.value
-            for (item in currentTrashed) {
-                dbHelper.restoreItem(item.mediaItem.id)
+            val (updatedStats, hasUndo) = withContext(dbDispatcher) {
+                dbHelper.restoreAllKeys(keys)
+                dbHelper.getStats() to dbHelper.hasUndoHistory()
             }
-            _mediaDeck.value = currentTrashed.map { it.mediaItem } + _mediaDeck.value
-            _trashedList.value = emptyList()
-            _stats.value = dbHelper.getStats()
-            refreshMonthProgress()
+            _stats.value = updatedStats
+            _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
+            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = false)
         }
     }
 
-    fun onPermanentDeletionComplete(deletedIds: Collection<Long>) {
+    fun requestPermanentDeleteLegacy(
+        batchItems: List<MediaItem>,
+        remainingAfterBatch: Int
+    ) {
         viewModelScope.launch {
-            dbHelper.deletePermanentlyAll(deletedIds)
-            _trashedList.value = _trashedList.value.filter { !deletedIds.contains(it.mediaItem.id) }
-            _stats.value = dbHelper.getStats()
-            refreshMonthProgress()
+            val result = repository.deletePermanentlyLegacy(batchItems)
+            onPermanentDeletionCompleted(
+                deletedItems = result.deletedItems,
+                remainingBatchCount = remainingAfterBatch,
+                failedCount = result.failedCount
+            )
         }
     }
+
+    fun onPermanentDeletionCompleted(
+        deletedItems: List<MediaItem>,
+        remainingBatchCount: Int = 0,
+        failedCount: Int = 0
+    ) {
+        viewModelScope.launch {
+            val deletedKeys = deletedItems.map { it.mediaKey }.toSet()
+            withContext(dbDispatcher) {
+                dbHelper.recordPermanentDeletion(deletedItems)
+            }
+            _trashedList.value = _trashedList.value.filter { !deletedKeys.contains(it.mediaItem.mediaKey) }
+
+            val feedbackParts = mutableListOf<String>()
+            if (deletedItems.isNotEmpty()) {
+                feedbackParts.add("Deleted ${deletedItems.size} items")
+            }
+            if (failedCount > 0) {
+                feedbackParts.add("$failedCount could not be deleted (owned by another app)")
+            }
+            if (remainingBatchCount > 0) {
+                feedbackParts.add("$remainingBatchCount left in bin — tap delete again for next batch")
+            }
+            if (feedbackParts.isNotEmpty()) {
+                _toastEvents.tryEmit(feedbackParts.joinToString(". "))
+            }
+
+            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = true)
+        }
+    }
+
+    fun createDeletePendingIntent(uris: List<Uri>) = repository.createDeletePendingIntent(uris)
 
     fun resetKeptHistory() {
+        sessionActionStack.removeAll { it.actionType == SwipeCleanDbHelper.STATUS_KEPT }
         viewModelScope.launch {
-            dbHelper.resetKeptHistory()
-            loadData(_selectedGroup.value?.key)
-        }
-    }
-
-    private fun refreshMonthProgress() {
-        viewModelScope.launch {
-            _monthProgressList.value = repository.loadMonthProgressList()
+            withContext(dbDispatcher) {
+                dbHelper.resetKeptHistory()
+            }
+            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = false)
         }
     }
 
     fun setInspectItem(item: MediaItem?) {
         _inspectItem.value = item
     }
+
+    private fun adjustMonthProgress(monthYearKey: String, delta: Int) {
+        if (delta == 0) return
+        _monthProgressList.value = _monthProgressList.value.map { month ->
+            if (month.monthKey == monthYearKey) {
+                val updated = (month.reviewedCount + delta).coerceIn(0, month.totalCount)
+                month.copy(reviewedCount = updated)
+            } else {
+                month
+            }
+        }
+    }
+
+    private fun removeFromDerivedQuickLists(key: MediaKey) {
+        _onThisDayList.value = _onThisDayList.value.filter { it.mediaKey != key }
+        refreshQuickDerivedGroupsFromLibrary()
+    }
+
+    private fun refreshQuickDerivedGroupsFromLibrary() {
+        viewModelScope.launch {
+            val allItems = repository.getLibrary(forceRefresh = false)
+            val stagedKeys = _stagedForDeletion.value.map { it.mediaKey }.toSet()
+            val excluded = cachedReviewedKeys + stagedKeys
+            val unreviewed = allItems.filter { !excluded.contains(it.mediaKey) }
+            _onThisDayList.value = repository.buildOnThisDay(unreviewed)
+            _quickCleanGroups.value = repository.buildQuickCleanGroups(unreviewed)
+        }
+    }
+
+    private fun itemMatchesActiveDeck(item: MediaItem): Boolean {
+        return when (val key = _activeDeckKey.value) {
+            null, "", "ALL" -> true
+            QuickCleanCategory.LARGE_VIDEOS.key -> item.isVideo && item.sizeBytes >= 40L * 1024L * 1024L
+            QuickCleanCategory.SCREENSHOTS.key -> !item.isVideo &&
+                (item.bucketName.contains("screenshot", ignoreCase = true) ||
+                    item.displayName.contains("screenshot", ignoreCase = true))
+            QuickCleanCategory.SIMILAR.key, "ON_THIS_DAY" -> false
+            else -> item.monthYearKey == key
+        }
+    }
+
+    private data class SnapshotTuple(
+        val reviewed: Set<MediaKey>,
+        val later: List<MediaKey>,
+        val trashed: Map<MediaKey, Long>,
+        val stats: CleanStats,
+        val hasUndo: Boolean
+    )
 }
