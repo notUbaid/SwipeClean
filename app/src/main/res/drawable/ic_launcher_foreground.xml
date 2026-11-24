@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Base angled photo card -->
+    <path
+        android:fillColor="#1E1E26"
+        android:pathData="M32,36 L70,30 C73,29.5 75.5,31.5 76,34.5 L82,68 C82.5,71 80.5,73.5 77.5,74 L39.5,80 C36.5,80.5 34,78.5 33.5,75.5 L27.5,42 C27,39 29,36.5 32,36 Z"/>
+    <!-- Top card (main) -->
+    <path
+        android:fillColor="#6366F1"
+        android:pathData="M34,30 L74,30 C77.3,30 80,32.7 80,36 L80,72 C80,75.3 77.3,78 74,78 L34,78 C30.7,78 28,75.3 28,72 L28,36 C28,32.7 30.7,30 34,30 Z"/>
+    <!-- Card image mountain outline -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,68 L48,50 L58,62 L66,54 L74,68 Z"/>
+    <!-- Card sun -->
+    <path
+        android:fillColor="#FCD34D"
+        android:pathData="M44,42 A4,4 0 1,1 44,42.01"/>
+    <!-- Green keep check -->
+    <path
+        android:strokeColor="#10B981"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M64,66 L72,74 L84,58"/>
+</vector>
