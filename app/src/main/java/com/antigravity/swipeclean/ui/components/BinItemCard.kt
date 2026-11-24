@@ -3,12 +3,10 @@ package com.antigravity.swipeclean.ui.components
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,30 +23,32 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.antigravity.swipeclean.data.model.TrashedItem
-import com.antigravity.swipeclean.ui.theme.DarkBorder
-import com.antigravity.swipeclean.ui.theme.DarkSurface
-import com.antigravity.swipeclean.ui.theme.DarkSurfaceElevated
+import com.antigravity.swipeclean.ui.theme.BorderSubtle
+import com.antigravity.swipeclean.ui.theme.CautionAmber
+import com.antigravity.swipeclean.ui.theme.CautionAmberTint
+import com.antigravity.swipeclean.ui.theme.DeleteRed
+import com.antigravity.swipeclean.ui.theme.DeleteRedTint
 import com.antigravity.swipeclean.ui.theme.KeepGreen
+import com.antigravity.swipeclean.ui.theme.KeepGreenTint
+import com.antigravity.swipeclean.ui.theme.ScrimDark
+import com.antigravity.swipeclean.ui.theme.SurfaceBase
+import com.antigravity.swipeclean.ui.theme.SurfaceElevated
 import com.antigravity.swipeclean.ui.theme.TextMuted
 import com.antigravity.swipeclean.ui.theme.TextPrimary
 import com.antigravity.swipeclean.ui.theme.TextSecondary
-import com.antigravity.swipeclean.ui.theme.TrashRed
-import com.antigravity.swipeclean.ui.theme.UndoYellow
 
 @Composable
 fun BinItemCard(
@@ -60,14 +60,15 @@ fun BinItemCard(
 ) {
     val item = trashedItem.mediaItem
     val context = LocalContext.current
+    val status = trashedItem.binStatus()
 
     Card(
         modifier = modifier
             .fillMaxWidth()
             .clickable { onClick() },
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        border = BorderStroke(1.dp, DarkBorder)
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = SurfaceBase),
+        border = BorderStroke(1.dp, BorderSubtle)
     ) {
         Row(
             modifier = Modifier
@@ -75,12 +76,11 @@ fun BinItemCard(
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Media thumbnail
             Box(
                 modifier = Modifier
-                    .size(72.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(DarkSurfaceElevated),
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(SurfaceElevated),
                 contentAlignment = Alignment.Center
             ) {
                 AsyncImage(
@@ -97,30 +97,26 @@ fun BinItemCard(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(Color(0x44000000)),
+                            .background(ScrimDark.copy(alpha = 0.35f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.PlayCircle,
                             contentDescription = "Video",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
+                            tint = TextPrimary,
+                            modifier = Modifier.size(22.dp)
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.width(14.dp))
+            Spacer(modifier = Modifier.width(12.dp))
 
-            // Details
-            Column(
-                modifier = Modifier.weight(1f)
-            ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = item.displayName,
                     color = TextPrimary,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp,
+                    style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -131,79 +127,74 @@ fun BinItemCard(
                     Text(
                         text = item.formattedSize,
                         color = TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
+                        style = MaterialTheme.typography.bodySmall
                     )
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    // Days remaining badge (Countdown)
-                    val days = trashedItem.daysRemaining
                     val badgeColor = when {
-                        days <= 1 -> TrashRed
-                        days <= 3 -> UndoYellow
+                        status.isExpired -> DeleteRed
+                        status.daysRemaining <= 2 -> CautionAmber
                         else -> TextSecondary
                     }
                     val badgeBg = when {
-                        days <= 1 -> Color(0x33EF4444)
-                        days <= 3 -> Color(0x33F59E0B)
-                        else -> Color(0x22FFFFFF)
+                        status.isExpired -> DeleteRedTint
+                        status.daysRemaining <= 2 -> CautionAmberTint
+                        else -> SurfaceElevated
                     }
 
                     Box(
                         modifier = Modifier
-                            .background(badgeBg, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                            .background(badgeBg, RoundedCornerShape(6.dp))
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = if (days == 0) "Expires today" else "$days days left",
+                            text = status.label,
                             color = badgeColor,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            style = MaterialTheme.typography.labelSmall
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(2.dp))
 
                 Text(
                     text = item.bucketName,
                     color = TextMuted,
-                    fontSize = 11.sp
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
-            // Action Buttons (Restore and Delete Permanently)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = onRestore,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(Color(0x2210B981), CircleShape)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Restore,
-                        contentDescription = "Restore",
-                        tint = KeepGreen,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+            IconButton(
+                onClick = onRestore,
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(KeepGreenTint, CircleShape)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Restore,
+                    contentDescription = "Restore item",
+                    tint = KeepGreen,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
 
-                Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(6.dp))
 
-                IconButton(
-                    onClick = onDeletePermanently,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(Color(0x22EF4444), CircleShape)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.DeleteForever,
-                        contentDescription = "Delete Permanently",
-                        tint = TrashRed,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+            IconButton(
+                onClick = onDeletePermanently,
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(DeleteRedTint, CircleShape)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DeleteForever,
+                    contentDescription = "Delete permanently",
+                    tint = DeleteRed,
+                    modifier = Modifier.size(20.dp)
+                )
             }
         }
     }

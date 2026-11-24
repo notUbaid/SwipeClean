@@ -3,15 +3,17 @@ package com.antigravity.swipeclean.ui.components
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -21,6 +23,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -36,12 +39,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -51,12 +55,14 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.antigravity.swipeclean.data.model.MediaItem
-import com.antigravity.swipeclean.ui.theme.AccentIndigo
-import com.antigravity.swipeclean.ui.theme.DarkSurface
+import com.antigravity.swipeclean.ui.theme.BorderSubtle
+import com.antigravity.swipeclean.ui.theme.OledBlack
+import com.antigravity.swipeclean.ui.theme.ScrimDark
+import com.antigravity.swipeclean.ui.theme.SurfaceBase
 import com.antigravity.swipeclean.ui.theme.TextPrimary
 import com.antigravity.swipeclean.ui.theme.TextSecondary
+import com.antigravity.swipeclean.util.formatDuration
 import kotlinx.coroutines.delay
-import java.util.Locale
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -64,18 +70,17 @@ fun VideoPlayerView(
     mediaItem: MediaItem,
     modifier: Modifier = Modifier,
     isActiveCard: Boolean = true,
-    showTimeline: Boolean = true
+    showTimeline: Boolean = true,
+    isFullscreen: Boolean = false
 ) {
     val context = LocalContext.current
 
-    // Optimization: If this is an underlying card, do NOT allocate hardware decoder ExoPlayer!
-    // Simply render a high-quality video frame thumbnail with play badge.
     if (!isActiveCard) {
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .clip(RoundedCornerShape(20.dp))
-                .background(DarkSurface),
+                .then(if (isFullscreen) Modifier else Modifier.clip(RoundedCornerShape(20.dp)))
+                .background(if (isFullscreen) OledBlack else SurfaceBase),
             contentAlignment = Alignment.Center
         ) {
             AsyncImage(
@@ -90,28 +95,28 @@ fun VideoPlayerView(
             Box(
                 modifier = Modifier
                     .size(56.dp)
-                    .background(Color(0x99000000), CircleShape),
+                    .background(ScrimDark, CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.PlayCircle,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(36.dp)
+                    contentDescription = "Video preview",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(34.dp)
                 )
             }
         }
         return
     }
 
-    var isPlaying by remember(mediaItem.id) { mutableStateOf(true) }
-    var isMuted by remember(mediaItem.id) { mutableStateOf(true) }
-    var currentPositionMs by remember(mediaItem.id) { mutableLongStateOf(0L) }
-    var totalDurationMs by remember(mediaItem.id) { mutableLongStateOf(mediaItem.durationMs) }
-    var isScrubbing by remember(mediaItem.id) { mutableStateOf(false) }
-    var scrubProgress by remember(mediaItem.id) { mutableFloatStateOf(0f) }
+    var isPlaying by remember(mediaItem.stableKey) { mutableStateOf(true) }
+    var isMuted by remember(mediaItem.stableKey) { mutableStateOf(true) }
+    var currentPositionMs by remember(mediaItem.stableKey) { mutableLongStateOf(0L) }
+    var totalDurationMs by remember(mediaItem.stableKey) { mutableLongStateOf(mediaItem.durationMs) }
+    var isScrubbing by remember(mediaItem.stableKey) { mutableStateOf(false) }
+    var scrubProgress by remember(mediaItem.stableKey) { mutableFloatStateOf(0f) }
 
-    val exoPlayer = remember(mediaItem.id) {
+    val exoPlayer = remember(mediaItem.stableKey) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(ExoMediaItem.fromUri(mediaItem.uri))
             repeatMode = Player.REPEAT_MODE_ONE
@@ -121,37 +126,42 @@ fun VideoPlayerView(
         }
     }
 
-    DisposableEffect(exoPlayer) {
-        val listener = object : Player.Listener {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, exoPlayer) {
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                exoPlayer.pause()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+
+        val playerListener = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY) {
                     totalDurationMs = exoPlayer.duration.coerceAtLeast(mediaItem.durationMs)
                 }
             }
+
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
             }
         }
-        exoPlayer.addListener(listener)
+        exoPlayer.addListener(playerListener)
 
         onDispose {
-            exoPlayer.removeListener(listener)
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+            exoPlayer.removeListener(playerListener)
             exoPlayer.stop()
             exoPlayer.release()
         }
     }
 
-    // Safe timeline tracking polling
-    LaunchedEffect(isPlaying, isScrubbing) {
+    LaunchedEffect(isPlaying, isScrubbing, exoPlayer) {
         while (isPlaying && !isScrubbing) {
-            try {
-                if (exoPlayer.playbackState != Player.STATE_IDLE) {
-                    currentPositionMs = exoPlayer.currentPosition
-                    totalDurationMs = exoPlayer.duration.coerceAtLeast(1L)
-                }
-            } catch (e: Exception) {
-                break
-            }
+            val state = runCatching { exoPlayer.playbackState }.getOrDefault(Player.STATE_IDLE)
+            if (state == Player.STATE_IDLE) break
+            currentPositionMs = runCatching { exoPlayer.currentPosition }.getOrDefault(0L)
+            totalDurationMs = runCatching { exoPlayer.duration }.getOrDefault(mediaItem.durationMs).coerceAtLeast(1L)
             delay(100L)
         }
     }
@@ -159,8 +169,8 @@ fun VideoPlayerView(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .clip(RoundedCornerShape(20.dp))
-            .background(DarkSurface),
+            .then(if (isFullscreen) Modifier else Modifier.clip(RoundedCornerShape(20.dp)))
+            .background(if (isFullscreen) OledBlack else SurfaceBase),
         contentAlignment = Alignment.Center
     ) {
         AndroidView(
@@ -174,11 +184,13 @@ fun VideoPlayerView(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Center tap to Play/Pause
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .clickable {
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) {
                     if (exoPlayer.isPlaying) {
                         exoPlayer.pause()
                     } else {
@@ -191,54 +203,53 @@ fun VideoPlayerView(
                 Box(
                     modifier = Modifier
                         .size(64.dp)
-                        .background(Color(0x99000000), CircleShape),
+                        .background(ScrimDark, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Play",
+                        contentDescription = "Play video",
                         tint = TextPrimary,
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(34.dp)
                     )
                 }
             }
         }
 
-        // Top right mute/unmute button
-        Box(
+        // Mute toggle at TopEnd (fullscreen Close sits at TopStart so they never overlap)
+        IconButton(
+            onClick = {
+                isMuted = !isMuted
+                exoPlayer.volume = if (isMuted) 0f else 1f
+            },
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(16.dp)
+                .then(if (isFullscreen) Modifier.statusBarsPadding() else Modifier)
+                .padding(14.dp)
+                .size(48.dp)
+                .background(ScrimDark, CircleShape)
         ) {
-            IconButton(
-                onClick = {
-                    isMuted = !isMuted
-                    exoPlayer.volume = if (isMuted) 0f else 1f
-                },
-                modifier = Modifier
-                    .size(40.dp)
-                    .background(Color(0x99000000), CircleShape)
-            ) {
-                Icon(
-                    imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
-                    contentDescription = if (isMuted) "Unmute" else "Mute",
-                    tint = TextPrimary,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
+            Icon(
+                imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                contentDescription = if (isMuted) "Unmute video" else "Mute video",
+                tint = TextPrimary,
+                modifier = Modifier.size(22.dp)
+            )
         }
 
-        // Bottom timeline scrubber & metadata
         if (showTimeline) {
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .background(Color(0xB3000000), RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .background(
+                        ScrimDark,
+                        if (isFullscreen) RoundedCornerShape(0.dp) else RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
+                    )
+                    .then(if (isFullscreen) Modifier.navigationBarsPadding() else Modifier)
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
             ) {
-                val currentSec = if (isScrubbing) (scrubProgress * totalDurationMs / 1000).toLong() else (currentPositionMs / 1000)
-                val totalSec = totalDurationMs / 1000
+                val activePosMs = if (isScrubbing) (scrubProgress * totalDurationMs).toLong() else currentPositionMs
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -246,13 +257,19 @@ fun VideoPlayerView(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = formatTime(currentSec),
+                        text = formatDuration(activePosMs),
                         color = TextPrimary,
-                        fontSize = 12.sp
+                        style = MaterialTheme.typography.labelMedium
                     )
 
                     Slider(
-                        value = if (isScrubbing) scrubProgress else (if (totalDurationMs > 0) (currentPositionMs.toFloat() / totalDurationMs).coerceIn(0f, 1f) else 0f),
+                        value = if (isScrubbing) {
+                            scrubProgress
+                        } else if (totalDurationMs > 0L) {
+                            (currentPositionMs.toFloat() / totalDurationMs).coerceIn(0f, 1f)
+                        } else {
+                            0f
+                        },
                         onValueChange = { newProgress ->
                             isScrubbing = true
                             scrubProgress = newProgress
@@ -267,20 +284,19 @@ fun VideoPlayerView(
                             .weight(1f)
                             .padding(horizontal = 8.dp),
                         colors = SliderDefaults.colors(
-                            thumbColor = AccentIndigo,
-                            activeTrackColor = AccentIndigo,
-                            inactiveTrackColor = Color(0x66FFFFFF)
+                            thumbColor = TextPrimary,
+                            activeTrackColor = TextPrimary,
+                            inactiveTrackColor = BorderSubtle
                         )
                     )
 
                     Text(
-                        text = formatTime(totalSec),
+                        text = formatDuration(totalDurationMs),
                         color = TextSecondary,
-                        fontSize = 12.sp
+                        style = MaterialTheme.typography.labelMedium
                     )
                 }
 
-                // File metadata
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -288,25 +304,19 @@ fun VideoPlayerView(
                     horizontalArrangement = Arrangement.Center
                 ) {
                     val details = listOfNotNull(
-                        "VIDEO",
+                        "Video",
                         mediaItem.formattedSize,
                         mediaItem.resolutionText.ifEmpty { null },
-                        mediaItem.formattedDate
-                    ).joinToString("  •  ")
+                        mediaItem.formattedDate.ifEmpty { null }
+                    ).joinToString("  ·  ")
 
                     Text(
                         text = details,
                         color = TextSecondary,
-                        fontSize = 11.sp
+                        style = MaterialTheme.typography.labelSmall
                     )
                 }
             }
         }
     }
-}
-
-private fun formatTime(seconds: Long): String {
-    val m = seconds / 60
-    val s = seconds % 60
-    return String.format(Locale.US, "%02d:%02d", m, s)
 }

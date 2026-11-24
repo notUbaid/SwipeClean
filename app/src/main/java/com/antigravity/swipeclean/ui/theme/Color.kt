@@ -2,29 +2,28 @@ package com.antigravity.swipeclean.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val DarkBackground = Color(0xFF070709)
-val DarkSurface = Color(0xFF121217)
-val DarkSurfaceElevated = Color(0xFF1B1B22)
-val DarkBorder = Color(0xFF242430)
-val DarkBorderSubtle = Color(0xFF1E1E28)
+// Pure OLED black canvas and neutral dark surfaces
+val OledBlack = Color(0xFF000000)
+val SurfaceBase = Color(0xFF0C0C0E)
+val SurfaceElevated = Color(0xFF161619)
+val BorderSubtle = Color(0xFF27272C)
 
-val KeepGreen = Color(0xFF10B981)
-val KeepGreenLight = Color(0xFF34D399)
-val KeepGreenDark = Color(0xFF059669)
+// Contrast-verified typography roles (>= 5.5:1 for muted on dark surfaces)
+val TextPrimary = Color(0xFFF4F4F5)
+val TextSecondary = Color(0xFFB3B3BD)
+val TextMuted = Color(0xFF93939E)
 
-val TrashRed = Color(0xFFEF4444)
-val TrashRedLight = Color(0xFFF87171)
-val TrashRedDark = Color(0xFFDC2626)
+// Semantic action colors only
+val KeepGreen = Color(0xFF22C55E)
+val KeepGreenTint = Color(0x2422C55E)
 
-val UndoYellow = Color(0xFFF59E0B)
-val UndoYellowLight = Color(0xFFFBBF24)
+val DeleteRed = Color(0xFFEF4444)
+val DeleteRedTint = Color(0x24EF4444)
 
-val AccentIndigo = Color(0xFF6366F1)
-val AccentPurple = Color(0xFF8B5CF6)
+val LaterBlue = Color(0xFF60A5FA)
+val LaterBlueTint = Color(0x2460A5FA)
 
-val TextPrimary = Color(0xFFF8FAFC)
-val TextSecondary = Color(0xFF94A3B8)
-val TextMuted = Color(0xFF64748B)
+val CautionAmber = Color(0xFFF59E0B)
+val CautionAmberTint = Color(0x24F59E0B)
 
-val OverlayBlack = Color(0xCC000000)
-val ScrimDark = Color(0x99000000)
+val ScrimDark = Color(0xB3000000)

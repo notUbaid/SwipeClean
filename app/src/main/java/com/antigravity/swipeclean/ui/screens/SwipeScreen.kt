@@ -1,8 +1,7 @@
 package com.antigravity.swipeclean.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,9 +13,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -24,50 +25,48 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.antigravity.swipeclean.MainViewModel
-import com.antigravity.swipeclean.ui.components.PhotoViewer
 import com.antigravity.swipeclean.ui.components.SwipeCard
-import com.antigravity.swipeclean.ui.components.VideoPlayerView
-import com.antigravity.swipeclean.ui.theme.AccentIndigo
-import com.antigravity.swipeclean.ui.theme.DarkBackground
-import com.antigravity.swipeclean.ui.theme.DarkBorder
-import com.antigravity.swipeclean.ui.theme.DarkSurface
-import com.antigravity.swipeclean.ui.theme.DarkSurfaceElevated
+import com.antigravity.swipeclean.ui.theme.BorderSubtle
+import com.antigravity.swipeclean.ui.theme.CautionAmber
+import com.antigravity.swipeclean.ui.theme.CautionAmberTint
+import com.antigravity.swipeclean.ui.theme.DeleteRed
+import com.antigravity.swipeclean.ui.theme.DeleteRedTint
 import com.antigravity.swipeclean.ui.theme.KeepGreen
+import com.antigravity.swipeclean.ui.theme.KeepGreenTint
+import com.antigravity.swipeclean.ui.theme.LaterBlue
+import com.antigravity.swipeclean.ui.theme.LaterBlueTint
+import com.antigravity.swipeclean.ui.theme.OledBlack
+import com.antigravity.swipeclean.ui.theme.SurfaceElevated
 import com.antigravity.swipeclean.ui.theme.TextMuted
 import com.antigravity.swipeclean.ui.theme.TextPrimary
 import com.antigravity.swipeclean.ui.theme.TextSecondary
-import com.antigravity.swipeclean.ui.theme.TrashRed
-import com.antigravity.swipeclean.ui.theme.UndoYellow
 
 @Composable
 fun SwipeScreen(
     viewModel: MainViewModel,
+    isViewerOpen: Boolean,
     onNavigateBackToHome: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -77,11 +76,11 @@ fun SwipeScreen(
     val showReviewDeletions by viewModel.showReviewDeletions.collectAsState()
     val canUndo by viewModel.canUndo.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
-    val inspectItem by viewModel.inspectItem.collectAsState()
 
     val haptic = LocalHapticFeedback.current
 
     if (showReviewDeletions) {
+        BackHandler { viewModel.closeReviewDeletionsScreen() }
         ReviewDeletionsScreen(
             stagedItems = stagedDeletions,
             onConfirmDeletions = { finalItems ->
@@ -97,85 +96,78 @@ fun SwipeScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(DarkBackground)
+            .background(OledBlack),
+        contentAlignment = Alignment.TopCenter
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .widthIn(max = 520.dp)
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
-            // Header Bar: Back Button, Title, Staged Review Button
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 6.dp),
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     IconButton(
                         onClick = onNavigateBackToHome,
                         modifier = Modifier
-                            .size(38.dp)
-                            .background(DarkSurfaceElevated, CircleShape)
+                            .size(48.dp)
+                            .background(SurfaceElevated, CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back to Months",
+                            contentDescription = "Back to months",
                             tint = TextPrimary,
                             modifier = Modifier.size(20.dp)
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(10.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
 
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = activeTitle,
                             color = TextPrimary,
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "${deck.size} remaining",
                             color = TextSecondary,
-                            fontSize = 11.sp
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
                 }
 
-                // Staged Deletions Review Button (if any)
                 if (stagedDeletions.isNotEmpty()) {
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0x33EF4444))
-                            .border(1.dp, TrashRed, RoundedCornerShape(16.dp))
+                            .heightIn(min = 48.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(DeleteRedTint)
+                            .border(1.dp, DeleteRed, RoundedCornerShape(14.dp))
                             .clickable { viewModel.openReviewDeletionsScreen() }
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.Delete,
-                                contentDescription = null,
-                                tint = TrashRed,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "Review (${stagedDeletions.size})",
-                                color = TrashRed,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                        Text(
+                            text = "Review (${stagedDeletions.size})",
+                            color = DeleteRed,
+                            style = MaterialTheme.typography.labelLarge
+                        )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Card Stack Deck Region
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -185,106 +177,89 @@ fun SwipeScreen(
                 when {
                     isLoading -> {
                         CircularProgressIndicator(
-                            color = AccentIndigo,
-                            modifier = Modifier.size(48.dp)
+                            color = TextPrimary,
+                            modifier = Modifier.size(40.dp)
                         )
                     }
                     deck.isEmpty() -> {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center,
-                            modifier = Modifier.padding(32.dp)
+                            modifier = Modifier.padding(28.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(80.dp)
-                                    .background(Color(0x2210B981), CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = "Done",
-                                    tint = KeepGreen,
-                                    modifier = Modifier.size(44.dp)
-                                )
-                            }
-
-                            Spacer(modifier = Modifier.height(20.dp))
-
                             Text(
-                                text = "Month Sorted! 🎉",
+                                text = "All caught up",
                                 color = TextPrimary,
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.Bold
+                                style = MaterialTheme.typography.headlineSmall
                             )
 
                             Spacer(modifier = Modifier.height(8.dp))
 
                             Text(
                                 text = if (stagedDeletions.isNotEmpty()) {
-                                    "You have ${stagedDeletions.size} photos ready for review before moving to the 7-day bin."
+                                    "${stagedDeletions.size} items ready to review before moving to the bin."
                                 } else {
-                                    "You've reviewed every photo in this month. Awesome job!"
+                                    "Nothing left to review in $activeTitle."
                                 },
                                 color = TextSecondary,
-                                fontSize = 14.sp,
+                                style = MaterialTheme.typography.bodyMedium,
                                 textAlign = TextAlign.Center
                             )
 
                             Spacer(modifier = Modifier.height(24.dp))
 
                             if (stagedDeletions.isNotEmpty()) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(16.dp))
-                                        .background(TrashRed)
-                                        .clickable { viewModel.openReviewDeletionsScreen() }
-                                        .padding(horizontal = 24.dp, vertical = 14.dp)
+                                Button(
+                                    onClick = { viewModel.openReviewDeletionsScreen() },
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = DeleteRed,
+                                        contentColor = TextPrimary
+                                    ),
+                                    modifier = Modifier.heightIn(min = 48.dp)
                                 ) {
                                     Text(
-                                        text = "Review & Clean (${stagedDeletions.size} photos)",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 15.sp
+                                        text = "Review staged (${stagedDeletions.size})",
+                                        style = MaterialTheme.typography.labelLarge
                                     )
                                 }
                             } else {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(16.dp))
-                                        .background(AccentIndigo)
-                                        .clickable { onNavigateBackToHome() }
-                                        .padding(horizontal = 24.dp, vertical = 14.dp)
+                                Button(
+                                    onClick = onNavigateBackToHome,
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = TextPrimary,
+                                        contentColor = OledBlack
+                                    ),
+                                    modifier = Modifier.heightIn(min = 48.dp)
                                 ) {
                                     Text(
-                                        text = "Back to Months",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 15.sp
+                                        text = "Back to months",
+                                        style = MaterialTheme.typography.labelLarge
                                     )
                                 }
                             }
                         }
                     }
                     else -> {
-                        // Underlying Card (preview behind top card)
                         if (deck.size > 1) {
-                            androidx.compose.runtime.key(deck[1].id) {
+                            key(deck[1].stableKey) {
                                 SwipeCard(
                                     mediaItem = deck[1],
                                     isTopCard = false,
+                                    isPlaybackActive = false,
                                     onSwipeRight = {},
                                     onSwipeLeft = {}
                                 )
                             }
                         }
 
-                        // Top Active Card
                         val topItem = deck[0]
-                        androidx.compose.runtime.key(topItem.id) {
+                        key(topItem.stableKey) {
                             SwipeCard(
                                 mediaItem = topItem,
                                 isTopCard = true,
+                                isPlaybackActive = !isViewerOpen,
                                 onSwipeRight = { item ->
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     viewModel.swipeRight(item)
@@ -293,9 +268,12 @@ fun SwipeScreen(
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     viewModel.swipeLeft(item)
                                 },
-                                onSwipeUp = { item ->
+                                onSwipeLater = { item ->
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    viewModel.swipeUpBookmark(item)
+                                    viewModel.swipeLater(item)
+                                },
+                                onInspectClick = { item ->
+                                    viewModel.setInspectItem(item)
                                 }
                             )
                         }
@@ -303,9 +281,8 @@ fun SwipeScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // Bottom Floating Controls (Trash, Undo, Bookmark, Zoom, Keep)
             if (deck.isNotEmpty()) {
                 val currentItem = deck[0]
 
@@ -316,26 +293,24 @@ fun SwipeScreen(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Trash Button (Swipe Left shortcut)
                     IconButton(
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             viewModel.swipeLeft(currentItem)
                         },
                         modifier = Modifier
-                            .size(60.dp)
-                            .background(Color(0x22EF4444), CircleShape)
-                            .border(2.dp, TrashRed, CircleShape)
+                            .size(58.dp)
+                            .background(DeleteRedTint, CircleShape)
+                            .border(1.5.dp, DeleteRed, CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Delete,
-                            contentDescription = "Trash",
-                            tint = TrashRed,
-                            modifier = Modifier.size(26.dp)
+                            contentDescription = "Delete",
+                            tint = DeleteRed,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
 
-                    // Undo Button
                     IconButton(
                         onClick = {
                             if (canUndo) {
@@ -347,115 +322,71 @@ fun SwipeScreen(
                         modifier = Modifier
                             .size(48.dp)
                             .background(
-                                if (canUndo) Color(0x22F59E0B) else Color(0x11FFFFFF),
+                                if (canUndo) CautionAmberTint else SurfaceElevated,
                                 CircleShape
                             )
-                            .border(1.5.dp, if (canUndo) UndoYellow else DarkBorder, CircleShape)
+                            .border(
+                                width = 1.dp,
+                                color = if (canUndo) CautionAmber else BorderSubtle,
+                                shape = CircleShape
+                            )
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.RotateLeft,
                             contentDescription = "Undo",
-                            tint = if (canUndo) UndoYellow else TextMuted,
+                            tint = if (canUndo) CautionAmber else TextMuted,
                             modifier = Modifier.size(22.dp)
                         )
                     }
 
-                    // Bookmark / Decide Later (Swipe Up shortcut)
                     IconButton(
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            viewModel.swipeUpBookmark(currentItem)
+                            viewModel.swipeLater(currentItem)
                         },
                         modifier = Modifier
                             .size(48.dp)
-                            .background(Color(0x226366F1), CircleShape)
-                            .border(1.5.dp, AccentIndigo, CircleShape)
+                            .background(LaterBlueTint, CircleShape)
+                            .border(1.dp, LaterBlue, CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Bookmark,
-                            contentDescription = "Bookmark",
-                            tint = AccentIndigo,
-                            modifier = Modifier.size(22.dp)
+                            contentDescription = "Save for later",
+                            tint = LaterBlue,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
 
-                    // Zoom / Inspect Fullscreen Button
                     IconButton(
-                        onClick = {
-                            viewModel.setInspectItem(currentItem)
-                        },
+                        onClick = { viewModel.setInspectItem(currentItem) },
                         modifier = Modifier
                             .size(48.dp)
-                            .background(DarkSurfaceElevated, CircleShape)
-                            .border(1.5.dp, DarkBorder, CircleShape)
+                            .background(SurfaceElevated, CircleShape)
+                            .border(1.dp, BorderSubtle, CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.Default.ZoomIn,
-                            contentDescription = "Zoom",
+                            contentDescription = "Inspect fullscreen",
                             tint = TextPrimary,
                             modifier = Modifier.size(22.dp)
                         )
                     }
 
-                    // Keep Button (Swipe Right shortcut)
                     IconButton(
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             viewModel.swipeRight(currentItem)
                         },
                         modifier = Modifier
-                            .size(60.dp)
-                            .background(Color(0x2210B981), CircleShape)
-                            .border(2.dp, KeepGreen, CircleShape)
+                            .size(58.dp)
+                            .background(KeepGreenTint, CircleShape)
+                            .border(1.5.dp, KeepGreen, CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Check,
                             contentDescription = "Keep",
                             tint = KeepGreen,
-                            modifier = Modifier.size(30.dp)
-                        )
-                    }
-                }
-            }
-        }
-
-        // Fullscreen Inspect Modal Dialog
-        inspectItem?.let { item ->
-            Dialog(
-                onDismissRequest = { viewModel.setInspectItem(null) },
-                properties = DialogProperties(usePlatformDefaultWidth = false)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black)
-                ) {
-                    if (item.isVideo) {
-                        VideoPlayerView(
-                            mediaItem = item,
-                            isActiveCard = true,
-                            showTimeline = true
-                        )
-                    } else {
-                        PhotoViewer(
-                            mediaItem = item,
-                            enableZoom = true,
-                            showMetadata = true
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { viewModel.setInspectItem(null) },
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(20.dp)
-                            .size(44.dp)
-                            .background(Color(0x88000000), CircleShape)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Close",
-                            tint = TextPrimary
+                            modifier = Modifier.size(26.dp)
                         )
                     }
                 }
