@@ -8,12 +8,18 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -224,7 +230,17 @@ fun VideoPlayerView(
             },
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .then(if (isFullscreen) Modifier.statusBarsPadding() else Modifier)
+                .then(
+                    if (isFullscreen) {
+                        Modifier.windowInsetsPadding(
+                            WindowInsets.statusBars.union(
+                                WindowInsets.displayCutout.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+                            )
+                        )
+                    } else {
+                        Modifier
+                    }
+                )
                 .padding(14.dp)
                 .size(48.dp)
                 .background(ScrimDark, CircleShape)
@@ -246,7 +262,17 @@ fun VideoPlayerView(
                         ScrimDark,
                         if (isFullscreen) RoundedCornerShape(0.dp) else RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
                     )
-                    .then(if (isFullscreen) Modifier.navigationBarsPadding() else Modifier)
+                    .then(
+                        if (isFullscreen) {
+                            Modifier.windowInsetsPadding(
+                                WindowInsets.navigationBars.union(
+                                    WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)
+                                )
+                            )
+                        } else {
+                            Modifier
+                        }
+                    )
                     .padding(horizontal = 16.dp, vertical = 10.dp)
             ) {
                 val activePosMs = if (isScrubbing) (scrubProgress * totalDurationMs).toLong() else currentPositionMs

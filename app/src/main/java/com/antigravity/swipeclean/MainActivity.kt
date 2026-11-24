@@ -27,14 +27,20 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -57,6 +63,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -81,6 +88,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.antigravity.swipeclean.data.model.MediaItem
+import com.antigravity.swipeclean.util.DeletionBatcher
 import com.antigravity.swipeclean.ui.components.PhotoViewer
 import com.antigravity.swipeclean.ui.components.VideoPlayerView
 import com.antigravity.swipeclean.ui.screens.BinScreen
@@ -98,7 +106,6 @@ import com.antigravity.swipeclean.ui.theme.SwipeCleanTheme
 import com.antigravity.swipeclean.ui.theme.TextPrimary
 import com.antigravity.swipeclean.ui.theme.TextSecondary
 
-private const val MAX_DELETE_BATCH = 200
 private const val PREFS_NAME = "swipeclean_prefs"
 private const val KEY_PERMISSION_ASKED = "permission_asked"
 
@@ -196,8 +203,8 @@ fun MainAppContainer(viewModel: MainViewModel) {
         val items = pendingLegacyAfterWriteGrant
         pendingLegacyAfterWriteGrant = emptyList()
         if (granted && items.isNotEmpty()) {
-            val batch = items.take(MAX_DELETE_BATCH)
-            viewModel.requestPermanentDeleteLegacy(batch, items.size - batch.size)
+            val plan = DeletionBatcher.planBatch(items)
+            viewModel.requestPermanentDeleteLegacy(plan.batch, plan.remainingCount)
         } else if (!granted && items.isNotEmpty()) {
             Toast.makeText(
                 context,
@@ -256,6 +263,9 @@ fun MainAppContainer(viewModel: MainViewModel) {
 
     Scaffold(
         containerColor = OledBlack,
+        contentWindowInsets = ScaffoldDefaults.contentWindowInsets.union(
+            WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)
+        ),
         bottomBar = {
             NavigationBar(
                 containerColor = SurfaceBase,
@@ -349,13 +359,12 @@ fun MainAppContainer(viewModel: MainViewModel) {
                             viewModel = viewModel,
                             onRequestPermanentDelete = { items ->
                                 if (items.isEmpty()) return@BinScreen
-                                val batch = items.take(MAX_DELETE_BATCH)
-                                val remaining = items.size - batch.size
+                                val plan = DeletionBatcher.planBatch(items)
 
-                                val pendingIntent = viewModel.createDeletePendingIntent(batch.map { it.uri })
+                                val pendingIntent = viewModel.createDeletePendingIntent(plan.batch.map { it.uri })
                                 if (pendingIntent != null) {
-                                    pendingDeletionBatch = batch
-                                    pendingRemainingCount = remaining
+                                    pendingDeletionBatch = plan.batch
+                                    pendingRemainingCount = plan.remainingCount
                                     val request = IntentSenderRequest.Builder(pendingIntent.intentSender).build()
                                     deleteIntentLauncher.launch(request)
                                 } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
@@ -367,7 +376,7 @@ fun MainAppContainer(viewModel: MainViewModel) {
                                     pendingLegacyAfterWriteGrant = items
                                     legacyWriteLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                                 } else {
-                                    viewModel.requestPermanentDeleteLegacy(batch, remaining)
+                                    viewModel.requestPermanentDeleteLegacy(plan.batch, plan.remainingCount)
                                 }
                             }
                         )
@@ -413,7 +422,11 @@ fun MainAppContainer(viewModel: MainViewModel) {
                     onClick = { viewModel.setInspectItem(null) },
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .statusBarsPadding()
+                        .windowInsetsPadding(
+                            WindowInsets.statusBars.union(
+                                WindowInsets.displayCutout.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+                            )
+                        )
                         .padding(14.dp)
                         .size(48.dp)
                         .background(ScrimDark, CircleShape)
@@ -488,7 +501,7 @@ private fun PermissionRequestScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(OledBlack)
-            .systemBarsPadding()
+            .safeDrawingPadding()
             .padding(28.dp),
         contentAlignment = Alignment.Center
     ) {

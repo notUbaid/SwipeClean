@@ -4,9 +4,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -110,7 +116,17 @@ fun PhotoViewer(
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .then(if (isFullscreen) Modifier.navigationBarsPadding() else Modifier)
+                    .then(
+                        if (isFullscreen) {
+                            Modifier.windowInsetsPadding(
+                                WindowInsets.navigationBars.union(
+                                    WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)
+                                )
+                            )
+                        } else {
+                            Modifier
+                        }
+                    )
                     .padding(bottom = 14.dp, start = 16.dp, end = 16.dp)
                     .background(ScrimDark, RoundedCornerShape(10.dp))
                     .padding(horizontal = 12.dp, vertical = 6.dp)

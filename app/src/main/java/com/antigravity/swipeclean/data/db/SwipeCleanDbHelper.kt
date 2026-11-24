@@ -8,6 +8,7 @@ import com.antigravity.swipeclean.data.model.CleanStats
 import com.antigravity.swipeclean.data.model.MediaItem
 import com.antigravity.swipeclean.data.model.MediaKey
 import com.antigravity.swipeclean.util.BinStatusCalculator
+import com.antigravity.swipeclean.util.DeletionBatcher
 import com.antigravity.swipeclean.util.StreakCalculator
 import java.time.LocalDate
 
@@ -345,10 +346,10 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
         try {
             val prevCount = getMetaLongLocked(db, META_FREED_COUNT)
             val prevBytes = getMetaLongLocked(db, META_FREED_BYTES)
-            val addedBytes = deletedItems.sumOf { maxOf(0L, it.sizeBytes) }
+            val summary = DeletionBatcher.summarizeFreed(deletedItems)
 
-            setMetaValueLocked(db, META_FREED_COUNT, (prevCount + deletedItems.size).toString())
-            setMetaValueLocked(db, META_FREED_BYTES, (prevBytes + addedBytes).toString())
+            setMetaValueLocked(db, META_FREED_COUNT, (prevCount + summary.count).toString())
+            setMetaValueLocked(db, META_FREED_BYTES, (prevBytes + summary.totalBytes).toString())
 
             for (chunk in deletedItems.chunked(SQL_PARAM_CHUNK)) {
                 for (item in chunk) {

@@ -11,11 +11,14 @@ import com.antigravity.swipeclean.data.model.MediaKey
 import com.antigravity.swipeclean.data.model.MonthProgress
 import com.antigravity.swipeclean.data.model.QuickCleanCategory
 import com.antigravity.swipeclean.data.model.QuickCleanGroup
-import com.antigravity.swipeclean.data.model.SwipeAction
 import com.antigravity.swipeclean.data.model.TrashedItem
 import com.antigravity.swipeclean.data.repository.MediaRepository
+import com.antigravity.swipeclean.util.DeletionBatcher
+import com.antigravity.swipeclean.util.SwipeUndoStack
+import com.antigravity.swipeclean.util.UndoStackItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -75,9 +78,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _toastEvents = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val toastEvents: SharedFlow<String> = _toastEvents.asSharedFlow()
 
-    private val sessionActionStack = ArrayDeque<SwipeAction>()
+    private val sessionActionStack = SwipeUndoStack<MediaItem>()
     private var inFlightKeys = HashSet<MediaKey>()
     private var cachedReviewedKeys = HashSet<MediaKey>()
+    private var loadJob: Job? = null
 
     init {
         repository.startObserving()
@@ -93,7 +97,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         forceLibraryScan: Boolean = false
     ) {
         _activeDeckKey.value = groupKey
-        viewModelScope.launch {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             _isLoading.value = true
 
             val allItems = repository.getLibrary(forceRefresh = forceLibraryScan)
@@ -163,7 +168,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val key = item.mediaKey
         if (!inFlightKeys.add(key) || _mediaDeck.value.none { it.mediaKey == key }) return
 
-        sessionActionStack.addFirst(SwipeAction(item, SwipeCleanDbHelper.STATUS_KEPT, isStagedOnly = false))
+        sessionActionStack.push(UndoStackItem(key, SwipeCleanDbHelper.STATUS_KEPT, isStagedOnly = false, payload = item))
         _mediaDeck.value = _mediaDeck.value.filter { it.mediaKey != key }
         cachedReviewedKeys.add(key)
         adjustMonthProgress(item.monthYearKey, +1)
@@ -188,7 +193,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val key = item.mediaKey
         if (!inFlightKeys.add(key) || _mediaDeck.value.none { it.mediaKey == key }) return
 
-        sessionActionStack.addFirst(SwipeAction(item, SwipeCleanDbHelper.STATUS_TRASHED, isStagedOnly = true))
+        sessionActionStack.push(UndoStackItem(key, SwipeCleanDbHelper.STATUS_TRASHED, isStagedOnly = true, payload = item))
         _mediaDeck.value = _mediaDeck.value.filter { it.mediaKey != key }
         _stagedForDeletion.value = listOf(item) + _stagedForDeletion.value
         removeFromDerivedQuickLists(key)
@@ -203,7 +208,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val key = item.mediaKey
         if (!inFlightKeys.add(key) || _mediaDeck.value.none { it.mediaKey == key }) return
 
-        sessionActionStack.addFirst(SwipeAction(item, SwipeCleanDbHelper.STATUS_LATER, isStagedOnly = false))
+        sessionActionStack.push(UndoStackItem(key, SwipeCleanDbHelper.STATUS_LATER, isStagedOnly = false, payload = item))
         _mediaDeck.value = _mediaDeck.value.filter { it.mediaKey != key }
         _laterList.value = listOf(item) + _laterList.value
         cachedReviewedKeys.add(key)
@@ -246,7 +251,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val keptFromStaged = stagedSnapshot.filter { !finalKeys.contains(it.mediaKey) }
         val allStagedKeys = stagedSnapshot.map { it.mediaKey }.toSet()
 
-        sessionActionStack.removeAll { it.isStagedOnly && allStagedKeys.contains(it.item.mediaKey) }
+        sessionActionStack.removeStagedForKeys(allStagedKeys)
         _stagedForDeletion.value = emptyList()
         _showReviewDeletions.value = false
 
@@ -269,10 +274,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun undo() {
-        if (sessionActionStack.isNotEmpty()) {
-            val lastAction = sessionActionStack.removeFirst()
-            val item = lastAction.item
-            val key = item.mediaKey
+        val lastAction = sessionActionStack.popOrNull()
+        if (lastAction != null) {
+            val item = lastAction.payload
+            val key = lastAction.key
             inFlightKeys.remove(key)
 
             if (lastAction.isStagedOnly) {
@@ -389,6 +394,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         inFlightKeys.remove(key)
         cachedReviewedKeys.remove(key)
         _trashedList.value = _trashedList.value.filter { it.mediaItem.mediaKey != key }
+        sessionActionStack.removeByKey(key)
         adjustMonthProgress(item.monthYearKey, -1)
 
         if (itemMatchesActiveDeck(item) && _mediaDeck.value.none { it.mediaKey == key }) {
@@ -455,18 +461,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             _trashedList.value = _trashedList.value.filter { !deletedKeys.contains(it.mediaItem.mediaKey) }
 
-            val feedbackParts = mutableListOf<String>()
-            if (deletedItems.isNotEmpty()) {
-                feedbackParts.add("Deleted ${deletedItems.size} items")
-            }
-            if (failedCount > 0) {
-                feedbackParts.add("$failedCount could not be deleted (owned by another app)")
-            }
-            if (remainingBatchCount > 0) {
-                feedbackParts.add("$remainingBatchCount left in bin — tap delete again for next batch")
-            }
-            if (feedbackParts.isNotEmpty()) {
-                _toastEvents.tryEmit(feedbackParts.joinToString(". "))
+            DeletionBatcher.formatDeletionFeedback(
+                deletedCount = deletedItems.size,
+                failedCount = failedCount,
+                remainingBatchCount = remainingBatchCount
+            )?.let { message ->
+                _toastEvents.tryEmit(message)
             }
 
             loadData(groupKey = _activeDeckKey.value, forceLibraryScan = true)
@@ -476,7 +476,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun createDeletePendingIntent(uris: List<Uri>) = repository.createDeletePendingIntent(uris)
 
     fun resetKeptHistory() {
-        sessionActionStack.removeAll { it.actionType == SwipeCleanDbHelper.STATUS_KEPT }
+        sessionActionStack.removeByActionType(SwipeCleanDbHelper.STATUS_KEPT)
         viewModelScope.launch {
             withContext(dbDispatcher) {
                 dbHelper.resetKeptHistory()

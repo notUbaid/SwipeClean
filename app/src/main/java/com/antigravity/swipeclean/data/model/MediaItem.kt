@@ -90,12 +90,6 @@ data class TrashedItem(
         get() = binStatus().isExpired
 }
 
-data class SwipeAction(
-    val item: MediaItem,
-    val actionType: String,
-    val isStagedOnly: Boolean
-)
-
 enum class QuickCleanCategory(val key: String, val title: String) {
     SIMILAR("SMART_SIMILAR", "Similar shots"),
     LARGE_VIDEOS("SMART_LARGE_VIDEOS", "Large videos"),
