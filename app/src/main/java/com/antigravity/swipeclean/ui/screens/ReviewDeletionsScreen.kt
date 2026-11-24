@@ -130,8 +130,7 @@ fun ReviewDeletionsScreen(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
-                border = BorderStroke(1.dp, BorderSubtle)
+                colors = CardDefaults.cardColors(containerColor = SurfaceElevated)
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Row(

@@ -133,8 +133,7 @@ fun BinScreen(
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
-                    border = BorderStroke(1.dp, BorderSubtle)
+                    colors = CardDefaults.cardColors(containerColor = SurfaceElevated)
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Row(

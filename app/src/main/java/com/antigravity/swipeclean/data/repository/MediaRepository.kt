@@ -20,6 +20,9 @@ import com.antigravity.swipeclean.data.model.QuickCleanCategory
 import com.antigravity.swipeclean.data.model.QuickCleanGroup
 import com.antigravity.swipeclean.data.model.TrashedItem
 import com.antigravity.swipeclean.util.MediaDateResolver
+import com.antigravity.swipeclean.util.MediaFilterSort
+import com.antigravity.swipeclean.util.MediaSortOrder
+import com.antigravity.swipeclean.util.MediaTypeFilter
 import com.antigravity.swipeclean.util.PerceptualHash
 import com.antigravity.swipeclean.util.extractMonthDateMeta
 import kotlinx.coroutines.CancellationException
@@ -127,10 +130,12 @@ class MediaRepository(context: Context) {
     suspend fun computeDeck(
         allItems: List<MediaItem>,
         groupKey: String?,
-        reviewedKeys: Set<MediaKey>
+        reviewedKeys: Set<MediaKey>,
+        typeFilter: MediaTypeFilter = MediaTypeFilter.ALL,
+        sortOrder: MediaSortOrder = MediaSortOrder.NEWEST
     ): List<MediaItem> = withContext(Dispatchers.Default) {
         val unreviewed = allItems.filter { !reviewedKeys.contains(it.mediaKey) }
-        when (groupKey) {
+        val scoped = when (groupKey) {
             QuickCleanCategory.SIMILAR.key -> findSimilarPhotos(unreviewed)
             QuickCleanCategory.LARGE_VIDEOS.key -> findLargeVideos(unreviewed)
             QuickCleanCategory.SCREENSHOTS.key -> findScreenshots(unreviewed)
@@ -138,6 +143,7 @@ class MediaRepository(context: Context) {
             null, "", "ALL" -> unreviewed
             else -> unreviewed.filter { it.monthYearKey == groupKey }
         }
+        MediaFilterSort.apply(scoped, typeFilter, sortOrder)
     }
 
     suspend fun buildMonthProgressList(

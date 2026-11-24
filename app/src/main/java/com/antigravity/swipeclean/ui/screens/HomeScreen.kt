@@ -18,12 +18,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -33,6 +33,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -44,14 +45,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.antigravity.swipeclean.MainViewModel
 import com.antigravity.swipeclean.data.model.MonthProgress
 import com.antigravity.swipeclean.data.model.QuickCleanCategory
-import com.antigravity.swipeclean.data.model.QuickCleanGroup
 import com.antigravity.swipeclean.ui.theme.BorderSubtle
 import com.antigravity.swipeclean.ui.theme.CautionAmber
 import com.antigravity.swipeclean.ui.theme.CautionAmberTint
@@ -64,6 +63,8 @@ import com.antigravity.swipeclean.ui.theme.SurfaceElevated
 import com.antigravity.swipeclean.ui.theme.TextMuted
 import com.antigravity.swipeclean.ui.theme.TextPrimary
 import com.antigravity.swipeclean.ui.theme.TextSecondary
+import com.antigravity.swipeclean.util.MediaSortOrder
+import com.antigravity.swipeclean.util.MediaTypeFilter
 import com.antigravity.swipeclean.util.formatBytes
 
 @Composable
@@ -73,6 +74,7 @@ fun HomeScreen(
     onSelectMoreMedia: () -> Unit,
     onOpenAppSettings: () -> Unit,
     onStartAllItemsSwipe: () -> Unit,
+    onStartFilteredDeck: (MediaTypeFilter, MediaSortOrder, String) -> Unit,
     onStartMonthSwipe: (String, String) -> Unit,
     onStartQuickClean: (QuickCleanCategory) -> Unit,
     onStartOnThisDaySwipe: () -> Unit,
@@ -263,8 +265,7 @@ fun HomeScreen(
                                         .fillMaxWidth()
                                         .clickable { onStartAllItemsSwipe() },
                                     shape = RoundedCornerShape(16.dp),
-                                    colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
-                                    border = BorderStroke(1.dp, BorderSubtle)
+                                    colors = CardDefaults.cardColors(containerColor = SurfaceElevated)
                                 ) {
                                     Row(
                                         modifier = Modifier
@@ -276,12 +277,12 @@ fun HomeScreen(
                                             imageVector = Icons.Default.PhotoLibrary,
                                             contentDescription = null,
                                             tint = TextPrimary,
-                                            modifier = Modifier.size(24.dp)
+                                            modifier = Modifier.size(22.dp)
                                         )
                                         Spacer(modifier = Modifier.width(14.dp))
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
-                                                text = "All photos and videos",
+                                                text = "Start cleaning",
                                                 color = TextPrimary,
                                                 style = MaterialTheme.typography.titleMedium
                                             )
@@ -294,7 +295,7 @@ fun HomeScreen(
                                         }
                                         Icon(
                                             imageVector = Icons.Default.ChevronRight,
-                                            contentDescription = "Open all items",
+                                            contentDescription = "Start cleaning all items",
                                             tint = TextSecondary,
                                             modifier = Modifier.size(22.dp)
                                         )
@@ -303,71 +304,70 @@ fun HomeScreen(
                             }
                         }
 
-                        if (onThisDayItems.isNotEmpty()) {
-                            item(key = "on_this_day") {
-                                Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onStartOnThisDaySwipe() },
-                                    shape = RoundedCornerShape(16.dp),
-                                    colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-                                    border = BorderStroke(1.dp, BorderSubtle)
+                        if (unreviewedSummary.count > 0 || onThisDayItems.isNotEmpty() || quickCleanGroups.isNotEmpty()) {
+                            item(key = "quick_filter_strip") {
+                                LazyRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(16.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.History,
-                                            contentDescription = null,
-                                            tint = TextPrimary,
-                                            modifier = Modifier.size(24.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(14.dp))
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = "On this day",
-                                                color = TextPrimary,
-                                                style = MaterialTheme.typography.titleMedium
-                                            )
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                text = "${onThisDayItems.size} items from past years",
-                                                color = TextSecondary,
-                                                style = MaterialTheme.typography.bodySmall
+                                    if (unreviewedSummary.videoCount > 0) {
+                                        item(key = "chip_videos") {
+                                            HomeFilterChip(
+                                                label = "Videos",
+                                                detail = "${unreviewedSummary.videoCount}",
+                                                onClick = {
+                                                    onStartFilteredDeck(
+                                                        MediaTypeFilter.VIDEOS,
+                                                        MediaSortOrder.NEWEST,
+                                                        "Videos"
+                                                    )
+                                                }
                                             )
                                         }
-                                        Icon(
-                                            imageVector = Icons.Default.ChevronRight,
-                                            contentDescription = "Open deck",
-                                            tint = TextSecondary,
-                                            modifier = Modifier.size(22.dp)
-                                        )
                                     }
-                                }
-                            }
-                        }
-
-                        if (quickCleanGroups.isNotEmpty()) {
-                            item(key = "quick_clean_header") {
-                                Text(
-                                    text = "Quick clean",
-                                    color = TextSecondary,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    modifier = Modifier.padding(top = 6.dp)
-                                )
-                            }
-                            item(key = "quick_clean_row") {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    quickCleanGroups.forEach { group ->
-                                        QuickCleanCard(
-                                            group = group,
-                                            modifier = Modifier.weight(1f),
+                                    if (unreviewedSummary.photoCount > 0) {
+                                        item(key = "chip_photos") {
+                                            HomeFilterChip(
+                                                label = "Photos",
+                                                detail = "${unreviewedSummary.photoCount}",
+                                                onClick = {
+                                                    onStartFilteredDeck(
+                                                        MediaTypeFilter.PHOTOS,
+                                                        MediaSortOrder.NEWEST,
+                                                        "Photos"
+                                                    )
+                                                }
+                                            )
+                                        }
+                                    }
+                                    if (unreviewedSummary.count > 0) {
+                                        item(key = "chip_largest") {
+                                            HomeFilterChip(
+                                                label = "Largest first",
+                                                detail = null,
+                                                onClick = {
+                                                    onStartFilteredDeck(
+                                                        MediaTypeFilter.ALL,
+                                                        MediaSortOrder.LARGEST,
+                                                        "Largest files"
+                                                    )
+                                                }
+                                            )
+                                        }
+                                    }
+                                    if (onThisDayItems.isNotEmpty()) {
+                                        item(key = "chip_on_this_day") {
+                                            HomeFilterChip(
+                                                label = "On this day",
+                                                detail = "${onThisDayItems.size}",
+                                                onClick = onStartOnThisDaySwipe
+                                            )
+                                        }
+                                    }
+                                    items(quickCleanGroups, key = { "qc_${it.category.key}" }) { group ->
+                                        HomeFilterChip(
+                                            label = group.category.title,
+                                            detail = "${group.count}  ·  ${group.formattedSize}",
                                             onClick = { onStartQuickClean(group.category) }
                                         )
                                     }
@@ -419,8 +419,7 @@ private fun PartialAccessCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
-        border = BorderStroke(1.dp, CautionAmber.copy(alpha = 0.4f))
+        colors = CardDefaults.cardColors(containerColor = SurfaceElevated)
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Text(
@@ -462,44 +461,36 @@ private fun PartialAccessCard(
 }
 
 @Composable
-private fun QuickCleanCard(
-    group: QuickCleanGroup,
-    modifier: Modifier = Modifier,
+private fun HomeFilterChip(
+    label: String,
+    detail: String?,
     onClick: () -> Unit
 ) {
-    Card(
-        modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .clickable { onClick() },
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderSubtle)
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(24.dp),
+        color = SurfaceBase,
+        modifier = Modifier.heightIn(min = 48.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 14.dp)
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                text = group.category.title,
+                text = label,
                 color = TextPrimary,
                 style = MaterialTheme.typography.labelLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "${group.count} items",
-                color = TextSecondary,
-                style = MaterialTheme.typography.labelMedium,
                 maxLines = 1
             )
-            Text(
-                text = group.formattedSize,
-                color = TextMuted,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1
-            )
+            if (detail != null) {
+                Text(
+                    text = detail,
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1
+                )
+            }
         }
     }
 }
@@ -518,10 +509,6 @@ private fun MonthProgressCard(
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (month.isCompleted) SurfaceElevated else SurfaceBase
-        ),
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (month.isCompleted) KeepGreen.copy(alpha = 0.35f) else BorderSubtle
         )
     ) {
         Row(

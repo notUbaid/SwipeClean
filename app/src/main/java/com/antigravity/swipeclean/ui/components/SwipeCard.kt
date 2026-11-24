@@ -5,7 +5,6 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -56,7 +55,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.antigravity.swipeclean.data.model.MediaItem
-import com.antigravity.swipeclean.ui.theme.BorderSubtle
 import com.antigravity.swipeclean.ui.theme.DeleteRed
 import com.antigravity.swipeclean.ui.theme.DeleteRedTint
 import com.antigravity.swipeclean.ui.theme.KeepGreen
@@ -288,7 +286,6 @@ fun SwipeCard(
             .then(dragModifier),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderSubtle),
         elevation = CardDefaults.cardElevation(defaultElevation = if (isTopCard) 8.dp else 2.dp)
     ) {
         Box(

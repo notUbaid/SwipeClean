@@ -18,10 +18,12 @@ An offline, open-source Android photo and video cleaner built with Kotlin and Je
 - **Chronological undo**: Steps backwards cleanly through staged and persisted actions (bounded 200-entry SQLite undo stack plus in-session actions).
 - **Pre-deletion review**: Grid review screen lets you untick any accidentally swiped items before moving the rest to the Bin.
 - **Bin with 7-day tracking**: Items marked for deletion display live countdown badges (`7 days left`, `1 day left`, `Expired`). Files remain in your device gallery until you confirm deletion in the Bin (`Delete expired` or `Delete all`).
+- **Sort & filter decks**: Filter any deck by Photos, Videos, or All media, and sort by Newest first, Oldest first, Largest first, or Smallest first — plus one-tap quick pills on Home.
 - **Month-by-month progress**: Groups media using `DATE_TAKEN` (falling back to `DATE_ADDED`, then `DATE_MODIFIED`) with circular completion rings and `ContentObserver` sync when new media arrives.
 - **On this day & quick clean**: Surfaces past-year memories on today's date, similar burst shots (time/aspect + 64-bit dHash), videos over 40 MB, and screenshots.
 - **Fullscreen media viewer**: Pinch-to-zoom (1x–5x) and double-tap zoom for photos via Coil; looping Media3 ExoPlayer with scrubbing timeline, mute toggle, and lifecycle pause (`ON_STOP`) for videos.
 - **Dark-only OLED palette**: Pure `#000000` canvas with contrast-checked neutral chrome and semantic action colors.
+- **Local gallery scope**: Works directly with on-device MediaStore photos and videos (including synced items still on the device). Cloud-only Google Photos items cannot be scanned or deleted by third-party apps following Google's March 2025 Photos API scope changes.
 - **Private & offline**: No accounts, no analytics, no `INTERNET` permission, `allowBackup="false"`, and `dataExtractionRules` excluding local SQLite tables so MediaStore IDs never migrate across device restores.
 
 ---

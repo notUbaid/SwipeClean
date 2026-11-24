@@ -136,8 +136,7 @@ fun SettingsScreen(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-                border = BorderStroke(1.dp, BorderSubtle)
+                colors = CardDefaults.cardColors(containerColor = SurfaceBase)
             ) {
                 Row(
                     modifier = Modifier
@@ -243,8 +242,7 @@ private fun StatCard(
     Card(
         modifier = modifier,
         shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-        border = BorderStroke(1.dp, BorderSubtle)
+        colors = CardDefaults.cardColors(containerColor = SurfaceBase)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(

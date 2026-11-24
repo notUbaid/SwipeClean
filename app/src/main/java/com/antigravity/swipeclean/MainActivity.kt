@@ -89,6 +89,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.antigravity.swipeclean.data.model.MediaItem
 import com.antigravity.swipeclean.util.DeletionBatcher
+import com.antigravity.swipeclean.util.MediaSortOrder
+import com.antigravity.swipeclean.util.MediaTypeFilter
 import com.antigravity.swipeclean.ui.components.PhotoViewer
 import com.antigravity.swipeclean.ui.components.VideoPlayerView
 import com.antigravity.swipeclean.ui.screens.BinScreen
@@ -341,6 +343,10 @@ fun MainAppContainer(viewModel: MainViewModel) {
                             },
                             onStartAllItemsSwipe = {
                                 viewModel.startAllItemsDeck()
+                                currentTab = AppTab.SWIPE
+                            },
+                            onStartFilteredDeck = { filter, sort, title ->
+                                viewModel.startFilteredAllDeck(filter, sort, title)
                                 currentTab = AppTab.SWIPE
                             },
                             onStartMonthSwipe = { monthKey, monthDisplay ->

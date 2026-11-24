@@ -15,6 +15,8 @@ import com.antigravity.swipeclean.data.model.QuickCleanGroup
 import com.antigravity.swipeclean.data.model.TrashedItem
 import com.antigravity.swipeclean.data.repository.MediaRepository
 import com.antigravity.swipeclean.util.DeletionBatcher
+import com.antigravity.swipeclean.util.MediaSortOrder
+import com.antigravity.swipeclean.util.MediaTypeFilter
 import com.antigravity.swipeclean.util.SwipeUndoStack
 import com.antigravity.swipeclean.util.UndoStackItem
 import kotlinx.coroutines.CancellationException
@@ -34,6 +36,8 @@ import java.util.concurrent.atomic.AtomicLong
 @Immutable
 data class AllLibrarySummary(
     val count: Int = 0,
+    val photoCount: Int = 0,
+    val videoCount: Int = 0,
     val totalSizeBytes: Long = 0L
 )
 
@@ -68,6 +72,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _activeDeckKey = MutableStateFlow<String?>("ALL")
     private val _activeDeckTitle = MutableStateFlow("All items")
     val activeDeckTitle: StateFlow<String> = _activeDeckTitle.asStateFlow()
+
+    private val _typeFilter = MutableStateFlow(MediaTypeFilter.ALL)
+    val typeFilter: StateFlow<MediaTypeFilter> = _typeFilter.asStateFlow()
+
+    private val _sortOrder = MutableStateFlow(MediaSortOrder.NEWEST)
+    val sortOrder: StateFlow<MediaSortOrder> = _sortOrder.asStateFlow()
 
     private val _stagedForDeletion = MutableStateFlow<List<MediaItem>>(emptyList())
     val stagedForDeletion: StateFlow<List<MediaItem>> = _stagedForDeletion.asStateFlow()
@@ -160,7 +170,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val fastQuickGroups = repository.buildFastQuickCleanGroups(unreviewed)
                 val later = repository.buildLaterList(allItems, laterKeys)
                 val trashed = repository.buildTrashedList(allItems, trashedMap)
-                val deck = repository.computeDeck(allItems, groupKey, effectiveExcluded)
+                val deck = repository.computeDeck(
+                    allItems = allItems,
+                    groupKey = groupKey,
+                    reviewedKeys = effectiveExcluded,
+                    typeFilter = _typeFilter.value,
+                    sortOrder = _sortOrder.value
+                )
 
                 if (loadSeq.get() != mySeq) return@launch
 
@@ -168,8 +184,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _monthProgressList.value = months
                 _onThisDayList.value = onThisDay
                 _quickCleanGroups.value = fastQuickGroups
+                val videoCount = unreviewed.count { it.isVideo }
                 _unreviewedSummary.value = AllLibrarySummary(
                     count = unreviewed.size,
+                    photoCount = unreviewed.size - videoCount,
+                    videoCount = videoCount,
                     totalSizeBytes = unreviewed.sumOf { maxOf(0L, it.sizeBytes) }
                 )
                 _laterList.value = later
@@ -232,16 +251,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startAllItemsDeck() {
+        _typeFilter.value = MediaTypeFilter.ALL
+        _sortOrder.value = MediaSortOrder.NEWEST
         _activeDeckTitle.value = "All items"
         loadData(groupKey = "ALL", forceLibraryScan = false, showSpinner = false)
     }
 
+    fun startFilteredAllDeck(
+        filter: MediaTypeFilter = MediaTypeFilter.ALL,
+        sort: MediaSortOrder = MediaSortOrder.NEWEST,
+        title: String
+    ) {
+        _typeFilter.value = filter
+        _sortOrder.value = sort
+        _activeDeckTitle.value = title
+        loadData(groupKey = "ALL", forceLibraryScan = false, showSpinner = false)
+    }
+
     fun startMonthDeck(monthKey: String, monthDisplay: String) {
+        _typeFilter.value = MediaTypeFilter.ALL
+        _sortOrder.value = MediaSortOrder.NEWEST
         _activeDeckTitle.value = monthDisplay
         loadData(groupKey = monthKey, forceLibraryScan = false, showSpinner = false)
     }
 
     fun startQuickCleanDeck(category: QuickCleanCategory) {
+        _typeFilter.value = MediaTypeFilter.ALL
+        _sortOrder.value = if (category == QuickCleanCategory.LARGE_VIDEOS) {
+            MediaSortOrder.LARGEST
+        } else {
+            MediaSortOrder.NEWEST
+        }
         _activeDeckTitle.value = category.title
         loadData(
             groupKey = category.key,
@@ -251,8 +291,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startOnThisDayDeck() {
+        _typeFilter.value = MediaTypeFilter.ALL
+        _sortOrder.value = MediaSortOrder.NEWEST
         _activeDeckTitle.value = "On this day"
         loadData(groupKey = "ON_THIS_DAY", forceLibraryScan = false, showSpinner = false)
+    }
+
+    fun updateDeckFilterAndSort(
+        filter: MediaTypeFilter = _typeFilter.value,
+        sort: MediaSortOrder = _sortOrder.value
+    ) {
+        _typeFilter.value = filter
+        _sortOrder.value = sort
+        recomputeActiveDeckFast()
+    }
+
+    fun clearDeckFilter() {
+        _typeFilter.value = MediaTypeFilter.ALL
+        _sortOrder.value = MediaSortOrder.NEWEST
+        recomputeActiveDeckFast()
+    }
+
+    private fun recomputeActiveDeckFast() {
+        viewModelScope.launch {
+            val allItems = repository.getLibrary(forceRefresh = false)
+            val stagedKeys = _stagedForDeletion.value.map { it.mediaKey }.toSet()
+            val excluded = cachedReviewedKeys + stagedKeys
+            val deck = repository.computeDeck(
+                allItems = allItems,
+                groupKey = _activeDeckKey.value,
+                reviewedKeys = excluded,
+                typeFilter = _typeFilter.value,
+                sortOrder = _sortOrder.value
+            )
+            _mediaDeck.value = deck
+            inFlightKeys.clear()
+        }
     }
 
     fun swipeRight(item: MediaItem) {
@@ -263,7 +337,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _mediaDeck.value = _mediaDeck.value.filter { it.mediaKey != key }
         cachedReviewedKeys.add(key)
         adjustMonthProgress(item.monthYearKey, +1)
-        adjustUnreviewedSummary(-1, -item.sizeBytes)
+        adjustUnreviewedSummary(-1, -item.sizeBytes, item.isVideo)
         removeFromDerivedQuickLists(key)
         _canUndo.value = true
 
@@ -288,7 +362,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sessionActionStack.push(UndoStackItem(key, SwipeCleanDbHelper.STATUS_TRASHED, isStagedOnly = true, payload = item))
         _mediaDeck.value = _mediaDeck.value.filter { it.mediaKey != key }
         _stagedForDeletion.value = listOf(item) + _stagedForDeletion.value
-        adjustUnreviewedSummary(-1, -item.sizeBytes)
+        adjustUnreviewedSummary(-1, -item.sizeBytes, item.isVideo)
         removeFromDerivedQuickLists(key)
         _canUndo.value = true
 
@@ -306,7 +380,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _laterList.value = listOf(item) + _laterList.value
         cachedReviewedKeys.add(key)
         adjustMonthProgress(item.monthYearKey, +1)
-        adjustUnreviewedSummary(-1, -item.sizeBytes)
+        adjustUnreviewedSummary(-1, -item.sizeBytes, item.isVideo)
         removeFromDerivedQuickLists(key)
         _canUndo.value = true
 
@@ -378,7 +452,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _stagedForDeletion.value = _stagedForDeletion.value.filter { it.mediaKey != key }
                 _mediaDeck.value = listOf(item) + _mediaDeck.value
                 _showReviewDeletions.value = false
-                adjustUnreviewedSummary(+1, item.sizeBytes)
+                adjustUnreviewedSummary(+1, item.sizeBytes, item.isVideo)
                 refreshQuickDerivedGroupsFromLibrary()
                 viewModelScope.launch {
                     val hasDbUndo = withContext(dbDispatcher) { dbHelper.hasUndoHistory() }
@@ -397,7 +471,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             cachedReviewedKeys.remove(key)
             adjustMonthProgress(item.monthYearKey, -1)
-            adjustUnreviewedSummary(+1, item.sizeBytes)
+            adjustUnreviewedSummary(+1, item.sizeBytes, item.isVideo)
             _mediaDeck.value = listOf(item) + _mediaDeck.value
             _showReviewDeletions.value = false
             refreshQuickDerivedGroupsFromLibrary()
@@ -442,7 +516,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _mediaDeck.value = listOf(restoredItem) + _mediaDeck.value
                 }
                 adjustMonthProgress(restoredItem.monthYearKey, -1)
-                adjustUnreviewedSummary(+1, restoredItem.sizeBytes)
+                adjustUnreviewedSummary(+1, restoredItem.sizeBytes, restoredItem.isVideo)
             }
 
             val (updatedStats, hasDbUndo) = withContext(dbDispatcher) {
@@ -493,7 +567,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _trashedList.value = _trashedList.value.filter { it.mediaItem.mediaKey != key }
         sessionActionStack.removeByKey(key)
         adjustMonthProgress(item.monthYearKey, -1)
-        adjustUnreviewedSummary(+1, item.sizeBytes)
+        adjustUnreviewedSummary(+1, item.sizeBytes, item.isVideo)
 
         if (itemMatchesActiveDeck(item) && _mediaDeck.value.none { it.mediaKey == key }) {
             _mediaDeck.value = listOf(item) + _mediaDeck.value
@@ -599,10 +673,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun adjustUnreviewedSummary(countDelta: Int, bytesDelta: Long) {
+    private fun adjustUnreviewedSummary(countDelta: Int, bytesDelta: Long, isVideo: Boolean) {
         val current = _unreviewedSummary.value
+        val nextPhotos = if (isVideo) current.photoCount else maxOf(0, current.photoCount + countDelta)
+        val nextVideos = if (isVideo) maxOf(0, current.videoCount + countDelta) else current.videoCount
         _unreviewedSummary.value = AllLibrarySummary(
             count = maxOf(0, current.count + countDelta),
+            photoCount = nextPhotos,
+            videoCount = nextVideos,
             totalSizeBytes = maxOf(0L, current.totalSizeBytes + bytesDelta)
         )
     }
@@ -633,6 +711,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun itemMatchesActiveDeck(item: MediaItem): Boolean {
+        val matchesTypeFilter = when (_typeFilter.value) {
+            MediaTypeFilter.ALL -> true
+            MediaTypeFilter.PHOTOS -> !item.isVideo
+            MediaTypeFilter.VIDEOS -> item.isVideo
+        }
+        if (!matchesTypeFilter) return false
+
         return when (val key = _activeDeckKey.value) {
             null, "", "ALL" -> true
             QuickCleanCategory.LARGE_VIDEOS.key -> item.isVideo && item.sizeBytes >= 40L * 1024L * 1024L

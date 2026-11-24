@@ -1,6 +1,5 @@
 package com.antigravity.swipeclean.ui.screens
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -44,7 +43,6 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.antigravity.swipeclean.MainViewModel
-import com.antigravity.swipeclean.ui.theme.BorderSubtle
 import com.antigravity.swipeclean.ui.theme.DeleteRed
 import com.antigravity.swipeclean.ui.theme.DeleteRedTint
 import com.antigravity.swipeclean.ui.theme.KeepGreen
@@ -152,8 +150,7 @@ fun LaterScreen(
                                 .fillMaxWidth()
                                 .clickable { viewModel.setInspectItem(item) },
                             shape = RoundedCornerShape(14.dp),
-                            colors = CardDefaults.cardColors(containerColor = SurfaceBase),
-                            border = BorderStroke(1.dp, BorderSubtle)
+                            colors = CardDefaults.cardColors(containerColor = SurfaceBase)
                         ) {
                             Column {
                                 Box(
