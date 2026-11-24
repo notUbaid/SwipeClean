@@ -1,6 +1,6 @@
-# SwipeClean ⚡
+# SwipeClean
 
-An ultra-fast, native Android photo and video cleaner engineered for modern devices and high-refresh-rate displays.
+An offline, open-source Android photo and video cleaner built with Kotlin and Jetpack Compose.
 
 [![Android CI](https://github.com/notUbaid/SwipeClean/actions/workflows/ci.yml/badge.svg)](https://github.com/notUbaid/SwipeClean/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/notUbaid/SwipeClean)](https://github.com/notUbaid/SwipeClean/releases/latest)
@@ -11,54 +11,59 @@ An ultra-fast, native Android photo and video cleaner engineered for modern devi
 
 ## Features
 
-- **120Hz Gesture Deck**: Smooth swipe physics with velocity dampening, rotation, and magnetic haptic feedback.
-  - **Swipe Right**: Keep media (remembered persistently).
-  - **Swipe Left**: Stage for deletion.
-  - **Swipe Up**: Bookmark / Decide later.
-- **Chronological Undo Engine**: Step backwards through actions instantly to correct accidental swipes.
-- **Safe 7-Day Bin**: Trashed items are held safely with live countdown badges before permanent removal.
-- **Pre-Deletion Review**: Review staged deletions with selective toggles before committing to the bin.
-- **Month-by-Month Progress**: Visual circular progress wheels showing reviewed status and storage metrics across your library.
-- **On This Day Memories**: Quickly review and curate photos taken on today's calendar date from previous years.
-- **Smart Quick Clean**: Dedicated filters for Similar & Burst shots, Large Videos, and Screenshots.
-- **High-Performance Media Viewing**:
-  - Fullscreen photo viewing with 1x–5x pinch-to-zoom and double-tap zoom, safely downsampled for high-resolution cameras.
-  - In-card looping video preview with interactive timeline frame scrubber and audio mute toggle.
-- **AMOLED Pitch Black Theme**: Pure black interface (`#070709`) to minimize power consumption on OLED displays.
-- **Privacy-First & Offline**: Completely on-device. No telemetry, no ads, no cloud sync, and no network access required.
+- **Card swipe deck**: Supports both drag distance thresholds and quick flick velocity, plus TalkBack custom actions and reduced-motion support.
+  - **Swipe right**: Keep media (remembered in local SQLite).
+  - **Swipe left**: Stage item for deletion.
+  - **Swipe up**: Move to the Later tab to decide after speed cleaning.
+- **Chronological undo**: Steps backwards cleanly through staged and persisted actions (bounded 200-entry SQLite undo stack plus in-session actions).
+- **Pre-deletion review**: Grid review screen lets you untick any accidentally swiped items before moving the rest to the Bin.
+- **Bin with 7-day tracking**: Items marked for deletion display live countdown badges (`7 days left`, `1 day left`, `Expired`). Files remain in your device gallery until you confirm deletion in the Bin (`Delete expired` or `Delete all`).
+- **Month-by-month progress**: Groups media using `DATE_TAKEN` (falling back to `DATE_ADDED`, then `DATE_MODIFIED`) with circular completion rings and `ContentObserver` sync when new media arrives.
+- **On this day & quick clean**: Surfaces past-year memories on today's date, similar burst shots (time/aspect + 64-bit dHash), videos over 40 MB, and screenshots.
+- **Fullscreen media viewer**: Pinch-to-zoom (1x–5x) and double-tap zoom for photos via Coil; looping Media3 ExoPlayer with scrubbing timeline, mute toggle, and lifecycle pause (`ON_STOP`) for videos.
+- **Dark-only OLED palette**: Pure `#000000` canvas with contrast-checked neutral chrome and semantic action colors.
+- **Private & offline**: No accounts, no analytics, no `INTERNET` permission, `allowBackup="false"`, and `dataExtractionRules` excluding local SQLite tables so MediaStore IDs never migrate across device restores.
 
 ---
 
-## Tech Stack & Architecture
+## Tech Stack
 
 - **Language**: Kotlin 2.0
-- **UI Framework**: Jetpack Compose (BOM 2024.11.00)
-- **Image Pipeline**: Coil 2.7.0 (with hardware video frame decoding)
-- **Video Engine**: AndroidX Media3 ExoPlayer 1.4.1
-- **Local Persistence**: SQLite with custom thread-safe helper
-- **Android Target**: Android 15 (compileSdk 35, targetSdk 35, minSdk 26)
+- **UI**: Jetpack Compose (BOM 2024.11.00), Material 3
+- **Image Loading**: Coil 2.7.0 (`coil-compose` + `coil-video`)
+- **Video Playback**: AndroidX Media3 ExoPlayer 1.4.1
+- **Storage**: SQLite (`reviewed_items` keyed by `(media_id, is_video)` to prevent API 26–28 ID collisions)
+- **SDK**: `compileSdk 35`, `targetSdk 35`, `minSdk 26`
 
 ---
 
 ## Building from Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/notUbaid/SwipeClean.git
 cd SwipeClean
 
-# Build debug APK
-./gradlew assembleDebug
+# Run unit tests, Android Lint, and build debug APK
+./gradlew testDebugUnitTest lintDebug assembleDebug
 
-# Build release APK
+# Build shrunk R8 release APK
 ./gradlew assembleRelease
 ```
+
+### Release Signing
+
+To sign release builds with your own keystore instead of the debug fallback key, export:
+
+- `SWIPECLEAN_KEYSTORE_PATH`
+- `SWIPECLEAN_KEYSTORE_PASSWORD`
+- `SWIPECLEAN_KEY_ALIAS`
+- `SWIPECLEAN_KEY_PASSWORD`
 
 ---
 
 ## Installation
 
-Download the latest APK directly from the [GitHub Releases](https://github.com/notUbaid/SwipeClean/releases/latest) page, or install via ADB:
+Download the APK from the [GitHub Releases](https://github.com/notUbaid/SwipeClean/releases/latest) page, or install via ADB:
 
 ```bash
 adb install -r SwipeClean-Release.apk
