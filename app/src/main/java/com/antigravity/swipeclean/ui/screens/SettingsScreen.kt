@@ -1,5 +1,7 @@
 package com.antigravity.swipeclean.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -25,6 +27,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -36,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.antigravity.swipeclean.MainViewModel
+import com.antigravity.swipeclean.data.backup.KeptBackupStorage
 import com.antigravity.swipeclean.ui.theme.BorderSubtle
 import com.antigravity.swipeclean.ui.theme.KeepGreen
 import com.antigravity.swipeclean.ui.theme.LaterBlue
@@ -52,7 +56,25 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val stats by viewModel.stats.collectAsState()
+    val linkedBackupName by viewModel.linkedBackupName.collectAsState()
+    val durableKeptCount by viewModel.durableKeptCount.collectAsState()
     var showResetDialog by remember { mutableStateOf(false) }
+
+    val createBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            viewModel.exportKeptBackup(uri)
+        }
+    }
+
+    val openBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.importKeptBackup(uri)
+        }
+    }
 
     Box(
         modifier = modifier
@@ -127,6 +149,94 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(22.dp))
 
             Text(
+                text = "Kept history backup",
+                color = TextSecondary,
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceBase)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "$durableKeptCount remembered signatures",
+                        color = TextPrimary,
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (linkedBackupName != null) {
+                            "Auto-syncing kept history to $linkedBackupName. Signatures also survive updates, folder moves, and app cloud backups."
+                        } else {
+                            "Kept items match by file signature across updates, folder moves, and app backups. Save a backup file in Downloads for instant offline restores after full uninstalls."
+                        },
+                        color = if (linkedBackupName != null) KeepGreen else TextSecondary,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                createBackupLauncher.launch(KeptBackupStorage.SUGGESTED_BACKUP_FILE_NAME)
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = TextPrimary,
+                                contentColor = OledBlack
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                        ) {
+                            Text(
+                                text = if (linkedBackupName != null) "Change file" else "Save backup",
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                openBackupLauncher.launch(arrayOf("application/json", "*/*"))
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, BorderSubtle),
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                        ) {
+                            Text(
+                                text = "Restore",
+                                color = TextPrimary,
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                    if (linkedBackupName != null) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        TextButton(
+                            onClick = { viewModel.unlinkExternalBackup() },
+                            modifier = Modifier.heightIn(min = 48.dp)
+                        ) {
+                            Text(
+                                text = "Turn off auto-sync",
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(22.dp))
+
+            Text(
                 text = "Preferences",
                 color = TextSecondary,
                 style = MaterialTheme.typography.titleSmall,
@@ -196,7 +306,7 @@ fun SettingsScreen(
             },
             text = {
                 Text(
-                    text = "Kept items will return to your swipe decks. Items in the bin and later list will stay untouched.",
+                    text = "Kept items will return to your swipe decks. Items in the bin, later list, and any saved external backup file will stay untouched.",
                     style = MaterialTheme.typography.bodyMedium
                 )
             },

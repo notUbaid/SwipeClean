@@ -9,6 +9,9 @@ import com.antigravity.swipeclean.data.model.MediaItem
 import com.antigravity.swipeclean.data.model.MediaKey
 import com.antigravity.swipeclean.util.BinStatusCalculator
 import com.antigravity.swipeclean.util.DeletionBatcher
+import com.antigravity.swipeclean.util.KeptMediaRecord
+import com.antigravity.swipeclean.util.ReconciliationPlan
+import com.antigravity.swipeclean.util.ReviewedRow
 import com.antigravity.swipeclean.util.StreakCalculator
 import java.time.LocalDate
 
@@ -24,7 +27,7 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
 
     companion object {
         const val DATABASE_NAME = "swipeclean.db"
-        const val DATABASE_VERSION = 3
+        const val DATABASE_VERSION = 4
         const val MAX_UNDO_ROWS = 200
         private const val SQL_PARAM_CHUNK = 400
 
@@ -35,6 +38,14 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
         const val COL_STATUS = "status"
         const val COL_SWIPED_AT = "swiped_at"
         const val COL_SIZE_BYTES = "size_bytes"
+        const val COL_FINGERPRINT = "fingerprint"
+
+        const val TABLE_KEPT_SIGNATURES = "kept_signatures"
+        const val COL_SIG_FP = "fingerprint"
+        const val COL_SIG_NAME = "display_name"
+        const val COL_SIG_IS_VIDEO = "is_video"
+        const val COL_SIG_SIZE = "size_bytes"
+        const val COL_SIG_KEPT_AT = "kept_at"
 
         const val TABLE_UNDO = "undo_stack"
         const val COL_UNDO_ID = "id"
@@ -55,6 +66,8 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
         private const val META_STREAK_DAYS = "streak_days"
         private const val META_FREED_COUNT = "lifetime_freed_count"
         private const val META_FREED_BYTES = "lifetime_freed_bytes"
+        private const val META_INITIAL_BACKUP_HYDRATED = "initial_backup_hydrated"
+        private const val META_BACKUP_URI = "external_backup_uri"
 
         @Volatile
         private var instance: SwipeCleanDbHelper? = null
@@ -81,7 +94,23 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
                 $COL_STATUS TEXT NOT NULL,
                 $COL_SWIPED_AT INTEGER NOT NULL,
                 $COL_SIZE_BYTES INTEGER NOT NULL,
+                $COL_FINGERPRINT TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY ($COL_MEDIA_ID, $COL_IS_VIDEO)
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_reviewed_fingerprint ON $TABLE_REVIEWED($COL_FINGERPRINT)"
+        )
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS $TABLE_KEPT_SIGNATURES (
+                $COL_SIG_FP TEXT PRIMARY KEY,
+                $COL_SIG_NAME TEXT NOT NULL DEFAULT '',
+                $COL_SIG_IS_VIDEO INTEGER NOT NULL,
+                $COL_SIG_SIZE INTEGER NOT NULL,
+                $COL_SIG_KEPT_AT INTEGER NOT NULL
             )
             """.trimIndent()
         )
@@ -156,6 +185,33 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
                 )
                 db.execSQL(
                     "DELETE FROM $TABLE_UNDO WHERE $COL_UNDO_ID NOT IN (SELECT $COL_UNDO_ID FROM $TABLE_UNDO ORDER BY $COL_UNDO_ID DESC LIMIT $MAX_UNDO_ROWS)"
+                )
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+        }
+        if (oldVersion < 4) {
+            db.beginTransaction()
+            try {
+                if (!columnExists(db, TABLE_REVIEWED, COL_FINGERPRINT)) {
+                    db.execSQL(
+                        "ALTER TABLE $TABLE_REVIEWED ADD COLUMN $COL_FINGERPRINT TEXT NOT NULL DEFAULT ''"
+                    )
+                }
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_reviewed_fingerprint ON $TABLE_REVIEWED($COL_FINGERPRINT)"
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS $TABLE_KEPT_SIGNATURES (
+                        $COL_SIG_FP TEXT PRIMARY KEY,
+                        $COL_SIG_NAME TEXT NOT NULL DEFAULT '',
+                        $COL_SIG_IS_VIDEO INTEGER NOT NULL,
+                        $COL_SIG_SIZE INTEGER NOT NULL,
+                        $COL_SIG_KEPT_AT INTEGER NOT NULL
+                    )
+                    """.trimIndent()
                 )
                 db.setTransactionSuccessful()
             } finally {
@@ -238,6 +294,7 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
         status: String,
         timestampMs: Long = System.currentTimeMillis()
     ) {
+        val prevKeptFp = findKeptFingerprintLocked(db, item.mediaKey)
         val values = ContentValues().apply {
             put(COL_MEDIA_ID, item.id)
             put(COL_IS_VIDEO, if (item.isVideo) 1 else 0)
@@ -245,8 +302,24 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
             put(COL_STATUS, status)
             put(COL_SWIPED_AT, timestampMs)
             put(COL_SIZE_BYTES, item.sizeBytes)
+            put(COL_FINGERPRINT, item.fingerprint)
         }
         db.insertWithOnConflict(TABLE_REVIEWED, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+
+        if (status == STATUS_KEPT) {
+            if (item.fingerprint.isNotBlank()) {
+                val sigValues = ContentValues().apply {
+                    put(COL_SIG_FP, item.fingerprint)
+                    put(COL_SIG_NAME, item.displayName)
+                    put(COL_SIG_IS_VIDEO, if (item.isVideo) 1 else 0)
+                    put(COL_SIG_SIZE, item.sizeBytes)
+                    put(COL_SIG_KEPT_AT, timestampMs)
+                }
+                db.insertWithOnConflict(TABLE_KEPT_SIGNATURES, null, sigValues, SQLiteDatabase.CONFLICT_REPLACE)
+            }
+        } else if (!prevKeptFp.isNullOrBlank()) {
+            pruneSignatureIfUnreferencedLocked(db, prevKeptFp)
+        }
     }
 
     private fun pushUndoRow(db: SQLiteDatabase, item: MediaItem, status: String) {
@@ -299,6 +372,7 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
             }
 
             val (undoId, undoEntry, isVideo) = entry
+            val keptFp = findKeptFingerprintLocked(db, undoEntry.mediaKey)
             val isVideoArg = if (isVideo) "1" else "0"
             db.delete(TABLE_UNDO, "$COL_UNDO_ID = ?", arrayOf(undoId.toString()))
             db.delete(
@@ -306,6 +380,9 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
                 "$COL_MEDIA_ID = ? AND $COL_IS_VIDEO = ?",
                 arrayOf(undoEntry.mediaId.toString(), isVideoArg)
             )
+            if (!keptFp.isNullOrBlank()) {
+                pruneSignatureIfUnreferencedLocked(db, keptFp)
+            }
 
             db.setTransactionSuccessful()
             return undoEntry
@@ -320,8 +397,12 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
         val args = arrayOf(key.id.toString(), if (key.isVideo) "1" else "0")
         db.beginTransaction()
         try {
+            val keptFp = findKeptFingerprintLocked(db, key)
             db.delete(TABLE_REVIEWED, "$COL_MEDIA_ID = ? AND $COL_IS_VIDEO = ?", args)
             db.delete(TABLE_UNDO, "$COL_UNDO_MEDIA_ID = ? AND $COL_UNDO_IS_VIDEO = ?", args)
+            if (!keptFp.isNullOrBlank()) {
+                pruneSignatureIfUnreferencedLocked(db, keptFp)
+            }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -334,14 +415,48 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
         val db = writableDatabase
         db.beginTransaction()
         try {
+            val fpsToCheck = LinkedHashSet<String>()
             for (key in keys) {
+                findKeptFingerprintLocked(db, key)?.let { if (it.isNotBlank()) fpsToCheck.add(it) }
                 val args = arrayOf(key.id.toString(), if (key.isVideo) "1" else "0")
                 db.delete(TABLE_REVIEWED, "$COL_MEDIA_ID = ? AND $COL_IS_VIDEO = ?", args)
                 db.delete(TABLE_UNDO, "$COL_UNDO_MEDIA_ID = ? AND $COL_UNDO_IS_VIDEO = ?", args)
             }
+            for (fp in fpsToCheck) {
+                pruneSignatureIfUnreferencedLocked(db, fp)
+            }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
+        }
+    }
+
+    private fun findKeptFingerprintLocked(db: SQLiteDatabase, key: MediaKey): String? {
+        db.query(
+            TABLE_REVIEWED,
+            arrayOf(COL_FINGERPRINT, COL_STATUS),
+            "$COL_MEDIA_ID = ? AND $COL_IS_VIDEO = ?",
+            arrayOf(key.id.toString(), if (key.isVideo) "1" else "0"),
+            null,
+            null,
+            null
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val fp = cursor.getString(0)
+            val status = cursor.getString(1)
+            return if (status == STATUS_KEPT) fp else null
+        }
+    }
+
+    private fun pruneSignatureIfUnreferencedLocked(db: SQLiteDatabase, fingerprint: String) {
+        if (fingerprint.isBlank()) return
+        db.rawQuery(
+            "SELECT 1 FROM $TABLE_REVIEWED WHERE $COL_STATUS = ? AND $COL_FINGERPRINT = ? LIMIT 1",
+            arrayOf(STATUS_KEPT, fingerprint)
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) {
+                db.delete(TABLE_KEPT_SIGNATURES, "$COL_SIG_FP = ?", arrayOf(fingerprint))
+            }
         }
     }
 
@@ -527,12 +642,188 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
     }
 
     @Synchronized
+    fun getAllReviewedRows(): List<ReviewedRow> {
+        val db = readableDatabase
+        val result = ArrayList<ReviewedRow>(256)
+        db.query(
+            TABLE_REVIEWED,
+            arrayOf(COL_MEDIA_ID, COL_IS_VIDEO, COL_STATUS, COL_SWIPED_AT, COL_SIZE_BYTES, COL_FINGERPRINT),
+            null,
+            null,
+            null,
+            null,
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(
+                    ReviewedRow(
+                        key = MediaKey(cursor.getLong(0), cursor.getInt(1) == 1),
+                        status = cursor.getString(2),
+                        swipedAtMs = cursor.getLong(3),
+                        sizeBytes = cursor.getLong(4),
+                        fingerprint = cursor.getString(5) ?: ""
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    @Synchronized
+    fun getAllKeptSignatures(): Map<String, KeptMediaRecord> {
+        val db = readableDatabase
+        val result = LinkedHashMap<String, KeptMediaRecord>()
+        db.query(
+            TABLE_KEPT_SIGNATURES,
+            arrayOf(COL_SIG_FP, COL_SIG_NAME, COL_SIG_IS_VIDEO, COL_SIG_SIZE, COL_SIG_KEPT_AT),
+            null,
+            null,
+            null,
+            null,
+            "$COL_SIG_KEPT_AT DESC"
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val fp = cursor.getString(0) ?: continue
+                if (fp.isBlank()) continue
+                result[fp] = KeptMediaRecord(
+                    fingerprint = fp,
+                    displayName = cursor.getString(1) ?: "",
+                    isVideo = cursor.getInt(2) == 1,
+                    sizeBytes = cursor.getLong(3),
+                    keptAtMs = cursor.getLong(4)
+                )
+            }
+        }
+        return result
+    }
+
+    @Synchronized
+    fun seedKeptSignatures(records: Collection<KeptMediaRecord>): Int {
+        if (records.isEmpty()) return 0
+        val db = writableDatabase
+        var inserted = 0
+        db.beginTransaction()
+        try {
+            for (record in records) {
+                if (record.fingerprint.isBlank()) continue
+                val values = ContentValues().apply {
+                    put(COL_SIG_FP, record.fingerprint)
+                    put(COL_SIG_NAME, record.displayName)
+                    put(COL_SIG_IS_VIDEO, if (record.isVideo) 1 else 0)
+                    put(COL_SIG_SIZE, record.sizeBytes)
+                    put(COL_SIG_KEPT_AT, record.keptAtMs)
+                }
+                val rowId = db.insertWithOnConflict(
+                    TABLE_KEPT_SIGNATURES,
+                    null,
+                    values,
+                    SQLiteDatabase.CONFLICT_IGNORE
+                )
+                if (rowId != -1L) inserted++
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return inserted
+    }
+
+    @Synchronized
+    fun applyReconciliation(plan: ReconciliationPlan) {
+        if (!plan.hasDbMutations) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for ((key, fp) in plan.backfillFingerprints) {
+                val values = ContentValues().apply { put(COL_FINGERPRINT, fp) }
+                db.update(
+                    TABLE_REVIEWED,
+                    values,
+                    "$COL_MEDIA_ID = ? AND $COL_IS_VIDEO = ?",
+                    arrayOf(key.id.toString(), if (key.isVideo) "1" else "0")
+                )
+            }
+
+            for (record in plan.discoveredSignatures) {
+                val values = ContentValues().apply {
+                    put(COL_SIG_FP, record.fingerprint)
+                    put(COL_SIG_NAME, record.displayName)
+                    put(COL_SIG_IS_VIDEO, if (record.isVideo) 1 else 0)
+                    put(COL_SIG_SIZE, record.sizeBytes)
+                    put(COL_SIG_KEPT_AT, record.keptAtMs)
+                }
+                db.insertWithOnConflict(
+                    TABLE_KEPT_SIGNATURES,
+                    null,
+                    values,
+                    SQLiteDatabase.CONFLICT_IGNORE
+                )
+            }
+
+            for (staleKey in plan.staleKeptKeysToRemove) {
+                db.delete(
+                    TABLE_REVIEWED,
+                    "$COL_MEDIA_ID = ? AND $COL_IS_VIDEO = ? AND $COL_STATUS = ?",
+                    arrayOf(staleKey.id.toString(), if (staleKey.isVideo) "1" else "0", STATUS_KEPT)
+                )
+            }
+
+            for (link in plan.newKeptLinks) {
+                val identity = link.identity
+                val values = ContentValues().apply {
+                    put(COL_MEDIA_ID, identity.key.id)
+                    put(COL_IS_VIDEO, if (identity.isVideo) 1 else 0)
+                    put(COL_URI, identity.uriString)
+                    put(COL_STATUS, STATUS_KEPT)
+                    put(COL_SWIPED_AT, link.keptAtMs)
+                    put(COL_SIZE_BYTES, identity.sizeBytes)
+                    put(COL_FINGERPRINT, identity.fingerprint)
+                }
+                db.insertWithOnConflict(
+                    TABLE_REVIEWED,
+                    null,
+                    values,
+                    SQLiteDatabase.CONFLICT_IGNORE
+                )
+            }
+
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun isInitialBackupHydrated(): Boolean =
+        getMetaStringLocked(readableDatabase, META_INITIAL_BACKUP_HYDRATED) == "1"
+
+    @Synchronized
+    fun markInitialBackupHydrated() {
+        setMetaValueLocked(writableDatabase, META_INITIAL_BACKUP_HYDRATED, "1")
+    }
+
+    @Synchronized
+    fun getBackupUriString(): String? =
+        getMetaStringLocked(readableDatabase, META_BACKUP_URI)?.takeIf { it.isNotBlank() }
+
+    @Synchronized
+    fun setBackupUriString(uriString: String?) {
+        val db = writableDatabase
+        if (uriString.isNullOrBlank()) {
+            db.delete(TABLE_META, "$COL_META_KEY = ?", arrayOf(META_BACKUP_URI))
+        } else {
+            setMetaValueLocked(db, META_BACKUP_URI, uriString)
+        }
+    }
+
+    @Synchronized
     fun resetKeptHistory() {
         val db = writableDatabase
         db.beginTransaction()
         try {
             db.delete(TABLE_REVIEWED, "$COL_STATUS = ?", arrayOf(STATUS_KEPT))
             db.delete(TABLE_UNDO, "$COL_UNDO_ACTION = ?", arrayOf(STATUS_KEPT))
+            db.delete(TABLE_KEPT_SIGNATURES, null, null)
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()

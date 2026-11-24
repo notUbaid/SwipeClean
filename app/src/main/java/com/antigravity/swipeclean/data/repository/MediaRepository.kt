@@ -21,6 +21,7 @@ import com.antigravity.swipeclean.data.model.QuickCleanGroup
 import com.antigravity.swipeclean.data.model.TrashedItem
 import com.antigravity.swipeclean.util.MediaDateResolver
 import com.antigravity.swipeclean.util.MediaFilterSort
+import com.antigravity.swipeclean.util.MediaFingerprint
 import com.antigravity.swipeclean.util.MediaSortOrder
 import com.antigravity.swipeclean.util.MediaTypeFilter
 import com.antigravity.swipeclean.util.PerceptualHash
@@ -414,7 +415,8 @@ class MediaRepository(context: Context) {
                 }
                 val id = c.getLong(idCol)
                 val uri = ContentUris.withAppendedId(contentUri, id)
-                val displayName = if (nameCol >= 0) c.getString(nameCol) ?: "Media_$id" else "Media_$id"
+                val rawDisplayName = if (nameCol >= 0) c.getString(nameCol) else null
+                val displayName = rawDisplayName ?: "Media_$id"
                 val mimeType = if (mimeCol >= 0) {
                     c.getString(mimeCol) ?: if (isVideo) "video/*" else "image/*"
                 } else if (isVideo) {
@@ -433,6 +435,7 @@ class MediaRepository(context: Context) {
 
                 val dateTakenMs = MediaDateResolver.resolveDateTakenMs(rawTaken, rawAdd, rawMod)
                 val dateMeta = extractMonthDateMeta(dateTakenMs)
+                val fingerprint = MediaFingerprint.build(isVideo, size, rawDisplayName)
 
                 destination.add(
                     MediaItem(
@@ -450,7 +453,8 @@ class MediaRepository(context: Context) {
                         monthYearDisplay = dateMeta.monthYearDisplay,
                         dayMonthKey = dateMeta.dayMonthKey,
                         year = dateMeta.year,
-                        isVideo = isVideo
+                        isVideo = isVideo,
+                        fingerprint = fingerprint
                     )
                 )
             }

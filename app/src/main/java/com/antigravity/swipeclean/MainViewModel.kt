@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.antigravity.swipeclean.data.backup.KeptBackupStorage
 import com.antigravity.swipeclean.data.db.SwipeCleanDbHelper
 import com.antigravity.swipeclean.data.model.CleanStats
 import com.antigravity.swipeclean.data.model.MediaItem
@@ -15,6 +16,7 @@ import com.antigravity.swipeclean.data.model.QuickCleanGroup
 import com.antigravity.swipeclean.data.model.TrashedItem
 import com.antigravity.swipeclean.data.repository.MediaRepository
 import com.antigravity.swipeclean.util.DeletionBatcher
+import com.antigravity.swipeclean.util.KeptHistoryReconciler
 import com.antigravity.swipeclean.util.MediaSortOrder
 import com.antigravity.swipeclean.util.MediaTypeFilter
 import com.antigravity.swipeclean.util.SwipeUndoStack
@@ -23,6 +25,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -46,6 +49,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = MediaRepository(application)
     private val dbHelper = SwipeCleanDbHelper.getInstance(application)
+    private val backupStorage = KeptBackupStorage(application)
     private val dbDispatcher = Dispatchers.IO.limitedParallelism(1)
 
     private val _mediaDeck = MutableStateFlow<List<MediaItem>>(emptyList())
@@ -103,6 +107,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _toastEvents = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val toastEvents: SharedFlow<String> = _toastEvents.asSharedFlow()
 
+    private val _linkedBackupName = MutableStateFlow<String?>(null)
+    val linkedBackupName: StateFlow<String?> = _linkedBackupName.asStateFlow()
+
+    private val _durableKeptCount = MutableStateFlow(0)
+    val durableKeptCount: StateFlow<Int> = _durableKeptCount.asStateFlow()
+
     private val sessionActionStack = SwipeUndoStack<MediaItem>()
     private var inFlightKeys = HashSet<MediaKey>()
     private var cachedReviewedKeys = HashSet<MediaKey>()
@@ -110,6 +120,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val loadSeq = AtomicLong(0L)
     private var loadJob: Job? = null
     private var similarJob: Job? = null
+    private var backupSyncJob: Job? = null
     @Volatile
     private var hasCompletedInitialLoad = false
 
@@ -149,17 +160,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             try {
                 val allItems = repository.getLibrary(forceRefresh = forceLibraryScan)
-                val (reviewedKeys, laterKeys, trashedMap, statsSnapshot, hasDbUndo) =
+                val snapshot =
                     withContext(dbDispatcher) {
+                        if (!dbHelper.isInitialBackupHydrated()) {
+                            backupStorage.readInternalSnapshot()?.let { payload ->
+                                dbHelper.seedKeptSignatures(payload.items)
+                            }
+                            dbHelper.markInitialBackupHydrated()
+                        }
+
+                        val reviewedRows = dbHelper.getAllReviewedRows()
+                        val keptSigs = dbHelper.getAllKeptSignatures()
+                        val plan = KeptHistoryReconciler.plan(
+                            libraryItems = allItems.map { it.toIdentity() },
+                            reviewedRows = reviewedRows,
+                            keptSignatures = keptSigs
+                        )
+                        if (plan.hasDbMutations) {
+                            dbHelper.applyReconciliation(plan)
+                        }
+
+                        val finalKeptSigs = if (plan.discoveredSignatures.isNotEmpty()) {
+                            dbHelper.getAllKeptSignatures()
+                        } else {
+                            keptSigs
+                        }
+                        if (plan.hasDbMutations) {
+                            backupStorage.writeInternalSnapshot(finalKeptSigs.values.toList())
+                        }
+
+                        val backupUri = dbHelper.getBackupUriString()
+                        val backupName = backupUri?.let { backupStorage.resolveDisplayName(Uri.parse(it)) }
+
                         SnapshotTuple(
-                            reviewed = dbHelper.getAllReviewedKeys(),
+                            reviewed = plan.effectiveReviewedKeys,
                             later = dbHelper.getAllLaterKeys(),
                             trashed = dbHelper.getAllTrashedMap(),
                             stats = dbHelper.getStats(),
-                            hasUndo = dbHelper.hasUndoHistory()
+                            hasUndo = dbHelper.hasUndoHistory(),
+                            durableKeptCount = finalKeptSigs.size,
+                            linkedBackupName = backupName,
+                            shouldSyncExternalBackup = plan.discoveredSignatures.isNotEmpty() && backupUri != null
                         )
                     }
 
+                val reviewedKeys = snapshot.reviewed
                 val stagedKeys = _stagedForDeletion.value.map { it.mediaKey }.toSet()
                 cachedReviewedKeys = reviewedKeys.toHashSet()
                 val effectiveExcluded = reviewedKeys + stagedKeys
@@ -168,8 +213,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val months = repository.buildMonthProgressList(allItems, reviewedKeys)
                 val onThisDay = repository.buildOnThisDay(unreviewed)
                 val fastQuickGroups = repository.buildFastQuickCleanGroups(unreviewed)
-                val later = repository.buildLaterList(allItems, laterKeys)
-                val trashed = repository.buildTrashedList(allItems, trashedMap)
+                val later = repository.buildLaterList(allItems, snapshot.later)
+                val trashed = repository.buildTrashedList(allItems, snapshot.trashed)
                 val deck = repository.computeDeck(
                     allItems = allItems,
                     groupKey = groupKey,
@@ -193,11 +238,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 _laterList.value = later
                 _trashedList.value = trashed
-                _stats.value = statsSnapshot
-                _canUndo.value = sessionActionStack.isNotEmpty() || hasDbUndo
+                _stats.value = snapshot.stats
+                _durableKeptCount.value = snapshot.durableKeptCount
+                _linkedBackupName.value = snapshot.linkedBackupName
+                _canUndo.value = sessionActionStack.isNotEmpty() || snapshot.hasUndo
                 inFlightKeys.clear()
                 hasCompletedInitialLoad = true
                 _isLoading.value = false
+
+                if (snapshot.shouldSyncExternalBackup) {
+                    scheduleKeptBackupSync(syncExternal = true)
+                }
 
                 // Compute visual similarity asynchronously after UI unlocks so startup never stalls on thumbnails
                 launchSimilarDetection(mySeq, unreviewed, fastQuickGroups)
@@ -346,12 +397,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            val (updatedStats, hasUndo) = withContext(dbDispatcher) {
+            val (updatedStats, hasUndo, keptSigCount) = withContext(dbDispatcher) {
                 dbHelper.markKept(item)
-                dbHelper.getStats() to dbHelper.hasUndoHistory()
+                Triple(dbHelper.getStats(), dbHelper.hasUndoHistory(), dbHelper.getAllKeptSignatures().size)
             }
             _stats.value = updatedStats
+            _durableKeptCount.value = keptSigCount
             _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
+            scheduleKeptBackupSync(syncExternal = true)
         }
     }
 
@@ -432,12 +485,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            val (updatedStats, hasUndo) = withContext(dbDispatcher) {
+            val (updatedStats, hasUndo, keptSigCount) = withContext(dbDispatcher) {
                 dbHelper.commitReviewBatch(keptItems = keptFromStaged, trashedItems = finalDeletions)
-                dbHelper.getStats() to dbHelper.hasUndoHistory()
+                Triple(dbHelper.getStats(), dbHelper.hasUndoHistory(), dbHelper.getAllKeptSignatures().size)
             }
             _stats.value = updatedStats
+            _durableKeptCount.value = keptSigCount
             _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
+            if (keptFromStaged.isNotEmpty()) {
+                scheduleKeptBackupSync(syncExternal = true)
+            }
         }
     }
 
@@ -477,12 +534,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             refreshQuickDerivedGroupsFromLibrary()
 
             viewModelScope.launch {
-                val (updatedStats, hasDbUndo) = withContext(dbDispatcher) {
+                val (updatedStats, hasDbUndo, keptSigCount) = withContext(dbDispatcher) {
                     dbHelper.restoreItem(key)
-                    dbHelper.getStats() to dbHelper.hasUndoHistory()
+                    Triple(dbHelper.getStats(), dbHelper.hasUndoHistory(), dbHelper.getAllKeptSignatures().size)
                 }
                 _stats.value = updatedStats
+                _durableKeptCount.value = keptSigCount
                 _canUndo.value = sessionActionStack.isNotEmpty() || hasDbUndo
+                if (lastAction.actionType == SwipeCleanDbHelper.STATUS_KEPT) {
+                    scheduleKeptBackupSync(syncExternal = true)
+                }
             }
             return
         }
@@ -519,12 +580,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 adjustUnreviewedSummary(+1, restoredItem.sizeBytes, restoredItem.isVideo)
             }
 
-            val (updatedStats, hasDbUndo) = withContext(dbDispatcher) {
-                dbHelper.getStats() to dbHelper.hasUndoHistory()
+            val (updatedStats, hasDbUndo, keptSigCount) = withContext(dbDispatcher) {
+                Triple(dbHelper.getStats(), dbHelper.hasUndoHistory(), dbHelper.getAllKeptSignatures().size)
             }
             _stats.value = updatedStats
+            _durableKeptCount.value = keptSigCount
             _canUndo.value = sessionActionStack.isNotEmpty() || hasDbUndo
             refreshQuickDerivedGroupsFromLibrary()
+            if (popped.action == SwipeCleanDbHelper.STATUS_KEPT) {
+                scheduleKeptBackupSync(syncExternal = true)
+            }
         }
     }
 
@@ -534,12 +599,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cachedReviewedKeys.add(key)
 
         viewModelScope.launch {
-            val (updatedStats, hasUndo) = withContext(dbDispatcher) {
+            val (updatedStats, hasUndo, keptSigCount) = withContext(dbDispatcher) {
                 dbHelper.markKept(item)
-                dbHelper.getStats() to dbHelper.hasUndoHistory()
+                Triple(dbHelper.getStats(), dbHelper.hasUndoHistory(), dbHelper.getAllKeptSignatures().size)
             }
             _stats.value = updatedStats
+            _durableKeptCount.value = keptSigCount
             _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
+            scheduleKeptBackupSync(syncExternal = true)
         }
     }
 
@@ -649,11 +716,82 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resetKeptHistory() {
         sessionActionStack.removeByActionType(SwipeCleanDbHelper.STATUS_KEPT)
+        backupSyncJob?.cancel()
         viewModelScope.launch {
             withContext(dbDispatcher) {
                 dbHelper.resetKeptHistory()
+                backupStorage.writeInternalSnapshot(emptyList())
             }
+            _durableKeptCount.value = 0
             loadData(groupKey = _activeDeckKey.value, forceLibraryScan = false, showSpinner = false)
+        }
+    }
+
+    fun exportKeptBackup(uri: Uri) {
+        viewModelScope.launch {
+            val (records, success, displayName) = withContext(dbDispatcher) {
+                backupStorage.takePersistablePermissions(uri)
+                val sigs = dbHelper.getAllKeptSignatures().values.toList()
+                val wrote = backupStorage.writeToUri(uri, sigs)
+                if (wrote) {
+                    dbHelper.setBackupUriString(uri.toString())
+                }
+                Triple(sigs, wrote, backupStorage.resolveDisplayName(uri))
+            }
+            if (success) {
+                _linkedBackupName.value = displayName
+                _toastEvents.tryEmit("Saved ${records.size} kept items (auto-sync enabled)")
+            } else {
+                _toastEvents.tryEmit("Couldn't write backup file")
+            }
+        }
+    }
+
+    fun importKeptBackup(uri: Uri) {
+        viewModelScope.launch {
+            val importedCount = withContext(dbDispatcher) {
+                val payload = backupStorage.readFromUri(uri) ?: return@withContext -1
+                dbHelper.seedKeptSignatures(payload.items)
+                val allSigs = dbHelper.getAllKeptSignatures().values.toList()
+                backupStorage.writeInternalSnapshot(allSigs)
+                payload.items.size
+            }
+            if (importedCount < 0) {
+                _toastEvents.tryEmit("Couldn't read backup file")
+                return@launch
+            }
+            _toastEvents.tryEmit("Loaded $importedCount kept items from backup")
+            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = false, showSpinner = false)
+        }
+    }
+
+    fun unlinkExternalBackup() {
+        viewModelScope.launch {
+            withContext(dbDispatcher) {
+                dbHelper.getBackupUriString()?.let { uriStr ->
+                    runCatching { backupStorage.releasePersistablePermissions(Uri.parse(uriStr)) }
+                }
+                dbHelper.setBackupUriString(null)
+            }
+            _linkedBackupName.value = null
+            _toastEvents.tryEmit("Backup auto-sync turned off")
+        }
+    }
+
+    private fun scheduleKeptBackupSync(syncExternal: Boolean) {
+        backupSyncJob?.cancel()
+        backupSyncJob = viewModelScope.launch {
+            delay(500L)
+            val (records, backupUri) = withContext(dbDispatcher) {
+                val sigs = dbHelper.getAllKeptSignatures().values.toList()
+                backupStorage.writeInternalSnapshot(sigs)
+                sigs to dbHelper.getBackupUriString()
+            }
+            if (syncExternal && backupUri != null) {
+                withContext(Dispatchers.IO) {
+                    backupStorage.writeToUri(Uri.parse(backupUri), records)
+                }
+            }
         }
     }
 
@@ -734,6 +872,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val later: List<MediaKey>,
         val trashed: Map<MediaKey, Long>,
         val stats: CleanStats,
-        val hasUndo: Boolean
+        val hasUndo: Boolean,
+        val durableKeptCount: Int,
+        val linkedBackupName: String?,
+        val shouldSyncExternalBackup: Boolean
     )
 }

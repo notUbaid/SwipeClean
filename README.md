@@ -24,7 +24,7 @@ An offline, open-source Android photo and video cleaner built with Kotlin and Je
 - **Fullscreen media viewer**: Pinch-to-zoom (1x–5x) and double-tap zoom for photos via Coil; looping Media3 ExoPlayer with scrubbing timeline, mute toggle, and lifecycle pause (`ON_STOP`) for videos.
 - **Dark-only OLED palette**: Pure `#000000` canvas with contrast-checked neutral chrome and semantic action colors.
 - **Local gallery scope**: Works directly with on-device MediaStore photos and videos (including synced items still on the device). Cloud-only Google Photos items cannot be scanned or deleted by third-party apps following Google's March 2025 Photos API scope changes.
-- **Private & offline**: No accounts, no analytics, no `INTERNET` permission, `allowBackup="false"`, and `dataExtractionRules` excluding local SQLite tables so MediaStore IDs never migrate across device restores.
+- **Private & durable kept history**: No analytics or `INTERNET` permission. Kept right-swipes are indexed by portable content signature (`(type, byte size, filename)` SHA-256) so they survive MediaStore ID shifts, folder moves, and APK updates. App Auto Backup and device transfer (`data_extraction_rules` / `full_backup_content`) selectively back up only kept signatures (`kept_history.json`) without raw MediaStore IDs or pending deletions, `hasFragileUserData="true"` enables Android's "Keep app data" uninstall option, and Stats includes auto-syncing SAF backup export/restore.
 
 ---
 

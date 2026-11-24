@@ -4,6 +4,8 @@ import android.net.Uri
 import androidx.compose.runtime.Immutable
 import com.antigravity.swipeclean.util.BinStatus
 import com.antigravity.swipeclean.util.BinStatusCalculator
+import com.antigravity.swipeclean.util.MediaFingerprint
+import com.antigravity.swipeclean.util.MediaIdentity
 import com.antigravity.swipeclean.util.formatBytes
 import com.antigravity.swipeclean.util.formatDuration
 import com.antigravity.swipeclean.util.formatShortDate
@@ -30,13 +32,23 @@ data class MediaItem(
     val monthYearDisplay: String,
     val dayMonthKey: String,
     val year: Int,
-    val isVideo: Boolean
+    val isVideo: Boolean,
+    val fingerprint: String = MediaFingerprint.build(isVideo, sizeBytes, displayName)
 ) {
     val mediaKey: MediaKey
         get() = MediaKey(id, isVideo)
 
     val stableKey: String
         get() = "${if (isVideo) "v" else "i"}_$id"
+
+    fun toIdentity(): MediaIdentity = MediaIdentity(
+        key = mediaKey,
+        uriString = uri.toString(),
+        displayName = displayName,
+        isVideo = isVideo,
+        sizeBytes = sizeBytes,
+        fingerprint = fingerprint
+    )
 
     val formattedSize: String
         get() = formatBytes(sizeBytes)
