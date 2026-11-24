@@ -12,6 +12,7 @@
         android:maxSdkVersion="28" />
 
     <application
+        android:name=".SwipeCleanApp"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"

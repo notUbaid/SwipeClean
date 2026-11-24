@@ -76,6 +76,7 @@ fun SwipeScreen(
     val showReviewDeletions by viewModel.showReviewDeletions.collectAsState()
     val canUndo by viewModel.canUndo.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val scanError by viewModel.scanError.collectAsState()
 
     val haptic = LocalHapticFeedback.current
 
@@ -175,11 +176,43 @@ fun SwipeScreen(
                 contentAlignment = Alignment.Center
             ) {
                 when {
-                    isLoading -> {
+                    isLoading && deck.isEmpty() -> {
                         CircularProgressIndicator(
                             color = TextPrimary,
                             modifier = Modifier.size(40.dp)
                         )
+                    }
+                    scanError != null && deck.isEmpty() -> {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(28.dp)
+                        ) {
+                            Text(
+                                text = "Couldn't read gallery",
+                                color = TextPrimary,
+                                style = MaterialTheme.typography.headlineSmall
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = scanError ?: "Unknown error",
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(24.dp))
+                            Button(
+                                onClick = { viewModel.loadData(forceLibraryScan = true, showSpinner = true) },
+                                shape = RoundedCornerShape(14.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = TextPrimary,
+                                    contentColor = OledBlack
+                                ),
+                                modifier = Modifier.heightIn(min = 48.dp)
+                            ) {
+                                Text(text = "Retry", style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
                     }
                     deck.isEmpty() -> {
                         Column(

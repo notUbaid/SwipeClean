@@ -166,12 +166,13 @@ fun MainAppContainer(viewModel: MainViewModel) {
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
         prefs.edit().putBoolean(KEY_PERMISSION_ASKED, true).apply()
+        val wasGranted = hasPermissions
         val granted = checkMediaPermissions(context)
         val partial = checkPartialMediaAccess(context)
         hasPermissions = granted
         isPartialAccess = partial
         isPermanentlyDenied = !granted && isMediaPermissionPermanentlyDenied(activity)
-        if (granted) {
+        if (granted && wasGranted) {
             viewModel.loadData(forceLibraryScan = true)
         }
     }
@@ -218,14 +219,15 @@ fun MainAppContainer(viewModel: MainViewModel) {
         val grantedNow = checkMediaPermissions(context)
         val partialNow = checkPartialMediaAccess(context)
         val wasGranted = hasPermissions
+        val wasPartial = isPartialAccess
         hasPermissions = grantedNow
         isPartialAccess = partialNow
         isPermanentlyDenied = !grantedNow &&
             prefs.getBoolean(KEY_PERMISSION_ASKED, false) &&
             isMediaPermissionPermanentlyDenied(activity)
 
-        if (grantedNow) {
-            if (!wasGranted) {
+        if (grantedNow && wasGranted) {
+            if (wasPartial && !partialNow) {
                 viewModel.loadData(forceLibraryScan = true)
             } else {
                 viewModel.onAppResumed()
@@ -235,7 +237,7 @@ fun MainAppContainer(viewModel: MainViewModel) {
 
     LaunchedEffect(hasPermissions) {
         if (hasPermissions) {
-            viewModel.loadData()
+            viewModel.ensureInitialLoaded()
         }
     }
 
@@ -329,7 +331,18 @@ fun MainAppContainer(viewModel: MainViewModel) {
                         HomeScreen(
                             viewModel = viewModel,
                             isPartialAccess = isPartialAccess,
-                            onRequestFullAccess = { permissionLauncher.launch(requiredPermissions) },
+                            onSelectMoreMedia = { permissionLauncher.launch(requiredPermissions) },
+                            onOpenAppSettings = {
+                                val intent = Intent(
+                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.fromParts("package", context.packageName, null)
+                                )
+                                context.startActivity(intent)
+                            },
+                            onStartAllItemsSwipe = {
+                                viewModel.startAllItemsDeck()
+                                currentTab = AppTab.SWIPE
+                            },
                             onStartMonthSwipe = { monthKey, monthDisplay ->
                                 viewModel.startMonthDeck(monthKey, monthDisplay)
                                 currentTab = AppTab.SWIPE

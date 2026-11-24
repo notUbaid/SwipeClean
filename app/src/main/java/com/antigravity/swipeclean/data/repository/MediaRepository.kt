@@ -5,6 +5,7 @@ import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
 import android.database.ContentObserver
+import android.database.Cursor
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -18,9 +19,17 @@ import com.antigravity.swipeclean.data.model.MonthProgress
 import com.antigravity.swipeclean.data.model.QuickCleanCategory
 import com.antigravity.swipeclean.data.model.QuickCleanGroup
 import com.antigravity.swipeclean.data.model.TrashedItem
+import com.antigravity.swipeclean.util.MediaDateResolver
 import com.antigravity.swipeclean.util.PerceptualHash
 import com.antigravity.swipeclean.util.extractMonthDateMeta
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -34,11 +43,13 @@ data class LegacyDeleteResult(
     val failedCount: Int
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class MediaRepository(context: Context) {
 
     private val appContext: Context = context.applicationContext
     private val contentResolver: ContentResolver = appContext.contentResolver
     private val scanMutex = Mutex()
+    private val thumbDispatcher = Dispatchers.IO.limitedParallelism(4)
     private val mediaDirty = AtomicBoolean(false)
     private var isObserverRegistered = false
 
@@ -93,7 +104,9 @@ class MediaRepository(context: Context) {
             withContext(Dispatchers.IO) {
                 val items = ArrayList<MediaItem>(512)
                 queryMediaTable(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, false, items)
+                currentCoroutineContext().ensureActive()
                 queryMediaTable(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, items)
+                currentCoroutineContext().ensureActive()
                 items.sortByDescending { it.dateTakenMs }
 
                 val byKey = HashMap<MediaKey, MediaItem>(items.size)
@@ -160,21 +173,11 @@ class MediaRepository(context: Context) {
         }.sortedByDescending { it.year }
     }
 
-    suspend fun buildQuickCleanGroups(unreviewed: List<MediaItem>): List<QuickCleanGroup> = withContext(Dispatchers.Default) {
-        val similar = findSimilarPhotos(unreviewed)
+    suspend fun buildFastQuickCleanGroups(unreviewed: List<MediaItem>): List<QuickCleanGroup> = withContext(Dispatchers.Default) {
         val largeVideos = findLargeVideos(unreviewed)
         val screenshots = findScreenshots(unreviewed)
 
         buildList {
-            if (similar.isNotEmpty()) {
-                add(
-                    QuickCleanGroup(
-                        category = QuickCleanCategory.SIMILAR,
-                        count = similar.size,
-                        totalSizeBytes = similar.sumOf { maxOf(0L, it.sizeBytes) }
-                    )
-                )
-            }
             if (largeVideos.isNotEmpty()) {
                 add(
                     QuickCleanGroup(
@@ -196,27 +199,59 @@ class MediaRepository(context: Context) {
         }
     }
 
-    private suspend fun findSimilarPhotos(unreviewed: List<MediaItem>): List<MediaItem> {
+    suspend fun buildSimilarQuickCleanGroup(unreviewed: List<MediaItem>): QuickCleanGroup? = withContext(Dispatchers.Default) {
+        val similar = findSimilarPhotos(unreviewed)
+        if (similar.isEmpty()) return@withContext null
+        QuickCleanGroup(
+            category = QuickCleanCategory.SIMILAR,
+            count = similar.size,
+            totalSizeBytes = similar.sumOf { maxOf(0L, it.sizeBytes) }
+        )
+    }
+
+    suspend fun findSimilarPhotos(unreviewed: List<MediaItem>): List<MediaItem> = withContext(Dispatchers.Default) {
         val images = unreviewed
             .filter { !it.isVideo }
             .sortedWith(compareBy<MediaItem>({ it.bucketName }, { it.dateTakenMs }))
 
-        if (images.size < 2) return emptyList()
+        if (images.size < 2) return@withContext emptyList()
+
+        // Collect candidate burst indices first without blocking UI
+        val candidatePairs = ArrayList<Pair<Int, Int>>()
+        val candidateItems = LinkedHashSet<MediaItem>()
+        for (i in 0 until images.size - 1) {
+            currentCoroutineContext().ensureActive()
+            val curr = images[i]
+            val next = images[i + 1]
+            val timeDiffMs = kotlin.math.abs(curr.dateTakenMs - next.dateTakenMs)
+            if (curr.bucketName == next.bucketName && timeDiffMs <= 8_000L && sameAspect(curr, next)) {
+                candidatePairs.add(i to (i + 1))
+                candidateItems.add(curr)
+                candidateItems.add(next)
+                if (candidateItems.size >= 400) break
+            }
+        }
+
+        if (candidatePairs.isEmpty()) return@withContext emptyList()
+
+        // Prefetch hashes concurrently with bounded parallelism
+        coroutineScope {
+            candidateItems.map { item ->
+                async(thumbDispatcher) {
+                    loadOrCacheDHash(item)
+                }
+            }.awaitAll()
+        }
 
         val similarPhotos = mutableListOf<MediaItem>()
         val addedKeys = HashSet<MediaKey>()
-
-        for (i in 0 until images.size - 1) {
+        for ((i, j) in candidatePairs) {
             val curr = images[i]
-            val next = images[i + 1]
-
+            val next = images[j]
             val timeDiffMs = kotlin.math.abs(curr.dateTakenMs - next.dateTakenMs)
-            if (curr.bucketName != next.bucketName || timeDiffMs > 8_000L || !sameAspect(curr, next)) {
-                continue
-            }
+            val h1 = synchronized(dHashCache) { dHashCache[curr.mediaKey] }
+            val h2 = synchronized(dHashCache) { dHashCache[next.mediaKey] }
 
-            val h1 = loadOrCacheDHash(curr)
-            val h2 = loadOrCacheDHash(next)
             val isVisualMatch = if (h1 != null && h2 != null) {
                 PerceptualHash.hammingDistance(h1, h2) <= PerceptualHash.DEFAULT_SIMILARITY_THRESHOLD
             } else {
@@ -228,7 +263,7 @@ class MediaRepository(context: Context) {
                 if (addedKeys.add(next.mediaKey)) similarPhotos.add(next)
             }
         }
-        return similarPhotos
+        similarPhotos
     }
 
     private fun sameAspect(a: MediaItem, b: MediaItem): Boolean {
@@ -238,33 +273,35 @@ class MediaRepository(context: Context) {
         return kotlin.math.abs(r1 - r2) <= 0.1f
     }
 
-    private suspend fun loadOrCacheDHash(item: MediaItem): Long? {
+    private fun loadOrCacheDHash(item: MediaItem): Long? {
         synchronized(dHashCache) {
             if (dHashCache.containsKey(item.mediaKey)) {
                 return dHashCache[item.mediaKey]
             }
         }
-        val hash = withContext(Dispatchers.IO) {
-            runCatching {
-                val bmp: Bitmap? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    contentResolver.loadThumbnail(item.uri, Size(64, 64), null)
-                } else {
-                    @Suppress("DEPRECATION")
-                    MediaStore.Images.Thumbnails.getThumbnail(
-                        contentResolver,
-                        item.id,
-                        MediaStore.Images.Thumbnails.MICRO_KIND,
-                        null
-                    )
-                }
-                bmp?.let {
-                    val computed = PerceptualHash.computeDHash(it)
-                    it.recycle()
-                    computed
-                }
-            }.getOrNull()
-        }
+        val hash = runCatching {
+            val bmp: Bitmap? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                contentResolver.loadThumbnail(item.uri, Size(64, 64), null)
+            } else {
+                @Suppress("DEPRECATION")
+                MediaStore.Images.Thumbnails.getThumbnail(
+                    contentResolver,
+                    item.id,
+                    MediaStore.Images.Thumbnails.MICRO_KIND,
+                    null
+                )
+            }
+            bmp?.let {
+                val computed = PerceptualHash.computeDHash(it)
+                it.recycle()
+                computed
+            }
+        }.getOrNull()
+
         synchronized(dHashCache) {
+            if (dHashCache.size >= 2000) {
+                dHashCache.clear()
+            }
             dHashCache[item.mediaKey] = hash
         }
         return hash
@@ -305,7 +342,7 @@ class MediaRepository(context: Context) {
     }
 
     @Suppress("DEPRECATION")
-    private fun queryMediaTable(
+    private suspend fun queryMediaTable(
         contentUri: Uri,
         isVideo: Boolean,
         destination: MutableList<MediaItem>
@@ -316,85 +353,100 @@ class MediaRepository(context: Context) {
             "datetaken"
         }
 
-        val projection = arrayOf(
+        val fullProjection = buildList {
+            add(MediaStore.MediaColumns._ID)
+            add(MediaStore.MediaColumns.DISPLAY_NAME)
+            add(MediaStore.MediaColumns.MIME_TYPE)
+            add(MediaStore.MediaColumns.SIZE)
+            add(dateTakenColName)
+            add(MediaStore.MediaColumns.DATE_ADDED)
+            add(MediaStore.MediaColumns.DATE_MODIFIED)
+            add(MediaStore.MediaColumns.WIDTH)
+            add(MediaStore.MediaColumns.HEIGHT)
+            add(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+            if (isVideo) add(MediaStore.Video.VideoColumns.DURATION)
+        }.toTypedArray()
+
+        val fallbackProjection = arrayOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.MIME_TYPE,
             MediaStore.MediaColumns.SIZE,
-            dateTakenColName,
             MediaStore.MediaColumns.DATE_ADDED,
             MediaStore.MediaColumns.DATE_MODIFIED,
-            MediaStore.MediaColumns.WIDTH,
-            MediaStore.MediaColumns.HEIGHT,
-            MediaStore.MediaColumns.BUCKET_DISPLAY_NAME,
-            if (isVideo) MediaStore.Video.VideoColumns.DURATION else MediaStore.MediaColumns._ID
+            MediaStore.MediaColumns.BUCKET_DISPLAY_NAME
         )
 
         val sortOrder = "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+        val cursor: Cursor? = try {
+            contentResolver.query(contentUri, fullProjection, null, null, sortOrder)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: SecurityException) {
+            throw e
+        } catch (_: Exception) {
+            contentResolver.query(contentUri, fallbackProjection, null, null, sortOrder)
+        }
 
-        runCatching {
-            contentResolver.query(contentUri, projection, null, null, sortOrder)?.use { cursor ->
-                val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
-                val nameCol = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
-                val mimeCol = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
-                val sizeCol = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
-                val takenCol = cursor.getColumnIndex(dateTakenColName)
-                val addCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
-                val modCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
-                val widthCol = cursor.getColumnIndex(MediaStore.MediaColumns.WIDTH)
-                val heightCol = cursor.getColumnIndex(MediaStore.MediaColumns.HEIGHT)
-                val bucketCol = cursor.getColumnIndex(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
-                val durationCol = if (isVideo) cursor.getColumnIndex(MediaStore.Video.VideoColumns.DURATION) else -1
+        cursor?.use { c ->
+            val idCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+            val nameCol = c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+            val mimeCol = c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+            val sizeCol = c.getColumnIndex(MediaStore.MediaColumns.SIZE)
+            val takenCol = c.getColumnIndex(dateTakenColName)
+            val addCol = c.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
+            val modCol = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+            val widthCol = c.getColumnIndex(MediaStore.MediaColumns.WIDTH)
+            val heightCol = c.getColumnIndex(MediaStore.MediaColumns.HEIGHT)
+            val bucketCol = c.getColumnIndex(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+            val durationCol = if (isVideo) c.getColumnIndex(MediaStore.Video.VideoColumns.DURATION) else -1
 
-                while (cursor.moveToNext()) {
-                    val id = cursor.getLong(idCol)
-                    val uri = ContentUris.withAppendedId(contentUri, id)
-                    val displayName = if (nameCol >= 0) cursor.getString(nameCol) ?: "Media_$id" else "Media_$id"
-                    val mimeType = if (mimeCol >= 0) {
-                        cursor.getString(mimeCol) ?: if (isVideo) "video/*" else "image/*"
-                    } else if (isVideo) {
-                        "video/*"
-                    } else {
-                        "image/*"
-                    }
-                    val size = if (sizeCol >= 0) maxOf(0L, cursor.getLong(sizeCol)) else 0L
-                    val rawTaken = if (takenCol >= 0 && !cursor.isNull(takenCol)) cursor.getLong(takenCol) else 0L
-                    val rawAdd = if (addCol >= 0 && !cursor.isNull(addCol)) cursor.getLong(addCol) else 0L
-                    val rawMod = if (modCol >= 0 && !cursor.isNull(modCol)) cursor.getLong(modCol) else 0L
-                    val width = if (widthCol >= 0) maxOf(0, cursor.getInt(widthCol)) else 0
-                    val height = if (heightCol >= 0) maxOf(0, cursor.getInt(heightCol)) else 0
-                    val bucket = if (bucketCol >= 0) cursor.getString(bucketCol) ?: "Other" else "Other"
-                    val duration = if (isVideo && durationCol >= 0) maxOf(0L, cursor.getLong(durationCol)) else 0L
-
-                    val dateTakenMs = when {
-                        rawTaken > 0L -> rawTaken
-                        rawAdd > 0L -> rawAdd * 1000L
-                        rawMod > 0L -> rawMod * 1000L
-                        else -> 0L
-                    }
-
-                    val dateMeta = extractMonthDateMeta(dateTakenMs)
-
-                    destination.add(
-                        MediaItem(
-                            id = id,
-                            uri = uri,
-                            displayName = displayName,
-                            mimeType = mimeType,
-                            sizeBytes = size,
-                            dateTakenMs = dateTakenMs,
-                            durationMs = duration,
-                            width = width,
-                            height = height,
-                            bucketName = bucket,
-                            monthYearKey = dateMeta.monthYearKey,
-                            monthYearDisplay = dateMeta.monthYearDisplay,
-                            dayMonthKey = dateMeta.dayMonthKey,
-                            year = dateMeta.year,
-                            isVideo = isVideo
-                        )
-                    )
+            var rowCount = 0
+            while (c.moveToNext()) {
+                if (++rowCount and 127 == 0) {
+                    currentCoroutineContext().ensureActive()
                 }
+                val id = c.getLong(idCol)
+                val uri = ContentUris.withAppendedId(contentUri, id)
+                val displayName = if (nameCol >= 0) c.getString(nameCol) ?: "Media_$id" else "Media_$id"
+                val mimeType = if (mimeCol >= 0) {
+                    c.getString(mimeCol) ?: if (isVideo) "video/*" else "image/*"
+                } else if (isVideo) {
+                    "video/*"
+                } else {
+                    "image/*"
+                }
+                val size = if (sizeCol >= 0 && !c.isNull(sizeCol)) maxOf(0L, c.getLong(sizeCol)) else 0L
+                val rawTaken = if (takenCol >= 0 && !c.isNull(takenCol)) c.getLong(takenCol) else 0L
+                val rawAdd = if (addCol >= 0 && !c.isNull(addCol)) c.getLong(addCol) else 0L
+                val rawMod = if (modCol >= 0 && !c.isNull(modCol)) c.getLong(modCol) else 0L
+                val width = if (widthCol >= 0 && !c.isNull(widthCol)) maxOf(0, c.getInt(widthCol)) else 0
+                val height = if (heightCol >= 0 && !c.isNull(heightCol)) maxOf(0, c.getInt(heightCol)) else 0
+                val bucket = if (bucketCol >= 0) c.getString(bucketCol) ?: "Other" else "Other"
+                val duration = if (isVideo && durationCol >= 0 && !c.isNull(durationCol)) maxOf(0L, c.getLong(durationCol)) else 0L
+
+                val dateTakenMs = MediaDateResolver.resolveDateTakenMs(rawTaken, rawAdd, rawMod)
+                val dateMeta = extractMonthDateMeta(dateTakenMs)
+
+                destination.add(
+                    MediaItem(
+                        id = id,
+                        uri = uri,
+                        displayName = displayName,
+                        mimeType = mimeType,
+                        sizeBytes = size,
+                        dateTakenMs = dateTakenMs,
+                        durationMs = duration,
+                        width = width,
+                        height = height,
+                        bucketName = bucket,
+                        monthYearKey = dateMeta.monthYearKey,
+                        monthYearDisplay = dateMeta.monthYearDisplay,
+                        dayMonthKey = dateMeta.dayMonthKey,
+                        year = dateMeta.year,
+                        isVideo = isVideo
+                    )
+                )
             }
         }
     }

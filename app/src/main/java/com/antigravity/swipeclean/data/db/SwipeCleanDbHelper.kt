@@ -66,6 +66,11 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
         }
     }
 
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        db.enableWriteAheadLogging()
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -143,7 +148,9 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
                 db.execSQL("DROP TABLE $TABLE_REVIEWED")
                 db.execSQL("ALTER TABLE ${TABLE_REVIEWED}_v3 RENAME TO $TABLE_REVIEWED")
 
-                db.execSQL("ALTER TABLE $TABLE_UNDO ADD COLUMN $COL_UNDO_IS_VIDEO INTEGER NOT NULL DEFAULT 0")
+                if (!columnExists(db, TABLE_UNDO, COL_UNDO_IS_VIDEO)) {
+                    db.execSQL("ALTER TABLE $TABLE_UNDO ADD COLUMN $COL_UNDO_IS_VIDEO INTEGER NOT NULL DEFAULT 0")
+                }
                 db.execSQL(
                     "UPDATE $TABLE_UNDO SET $COL_UNDO_ACTION = '$STATUS_LATER' WHERE $COL_UNDO_ACTION = 'BOOKMARKED'"
                 )
@@ -530,5 +537,17 @@ class SwipeCleanDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
         } finally {
             db.endTransaction()
         }
+    }
+
+    private fun columnExists(db: SQLiteDatabase, table: String, column: String): Boolean {
+        db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+            val nameCol = cursor.getColumnIndex("name")
+            while (cursor.moveToNext()) {
+                if (nameCol >= 0 && cursor.getString(nameCol) == column) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 }

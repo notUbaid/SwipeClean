@@ -2,6 +2,7 @@ package com.antigravity.swipeclean
 
 import android.app.Application
 import android.net.Uri
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.antigravity.swipeclean.data.db.SwipeCleanDbHelper
@@ -16,6 +17,7 @@ import com.antigravity.swipeclean.data.repository.MediaRepository
 import com.antigravity.swipeclean.util.DeletionBatcher
 import com.antigravity.swipeclean.util.SwipeUndoStack
 import com.antigravity.swipeclean.util.UndoStackItem
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -27,6 +29,13 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicLong
+
+@Immutable
+data class AllLibrarySummary(
+    val count: Int = 0,
+    val totalSizeBytes: Long = 0L
+)
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -43,6 +52,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _quickCleanGroups = MutableStateFlow<List<QuickCleanGroup>>(emptyList())
     val quickCleanGroups: StateFlow<List<QuickCleanGroup>> = _quickCleanGroups.asStateFlow()
+
+    private val _unreviewedSummary = MutableStateFlow(AllLibrarySummary())
+    val unreviewedSummary: StateFlow<AllLibrarySummary> = _unreviewedSummary.asStateFlow()
 
     private val _onThisDayList = MutableStateFlow<List<MediaItem>>(emptyList())
     val onThisDayList: StateFlow<List<MediaItem>> = _onThisDayList.asStateFlow()
@@ -69,6 +81,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLoading = MutableStateFlow(true)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    private val _scanError = MutableStateFlow<String?>(null)
+    val scanError: StateFlow<String?> = _scanError.asStateFlow()
+
     private val _canUndo = MutableStateFlow(false)
     val canUndo: StateFlow<Boolean> = _canUndo.asStateFlow()
 
@@ -81,7 +96,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val sessionActionStack = SwipeUndoStack<MediaItem>()
     private var inFlightKeys = HashSet<MediaKey>()
     private var cachedReviewedKeys = HashSet<MediaKey>()
+
+    private val loadSeq = AtomicLong(0L)
     private var loadJob: Job? = null
+    private var similarJob: Job? = null
+    @Volatile
+    private var hasCompletedInitialLoad = false
 
     init {
         repository.startObserving()
@@ -92,55 +112,117 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
     }
 
+    fun ensureInitialLoaded() {
+        if (hasCompletedInitialLoad || loadJob?.isActive == true) return
+        loadData(
+            groupKey = _activeDeckKey.value ?: "ALL",
+            forceLibraryScan = false,
+            showSpinner = true
+        )
+    }
+
     fun loadData(
         groupKey: String? = _activeDeckKey.value,
-        forceLibraryScan: Boolean = false
+        forceLibraryScan: Boolean = false,
+        showSpinner: Boolean = _monthProgressList.value.isEmpty()
     ) {
         _activeDeckKey.value = groupKey
+        val mySeq = loadSeq.incrementAndGet()
         loadJob?.cancel()
+        similarJob?.cancel()
+
         loadJob = viewModelScope.launch {
-            _isLoading.value = true
+            if (showSpinner) {
+                _isLoading.value = true
+            }
+            _scanError.value = null
 
-            val allItems = repository.getLibrary(forceRefresh = forceLibraryScan)
-            val (reviewedKeys, laterKeys, trashedMap, statsSnapshot, hasDbUndo) =
-                withContext(dbDispatcher) {
-                    SnapshotTuple(
-                        reviewed = dbHelper.getAllReviewedKeys(),
-                        later = dbHelper.getAllLaterKeys(),
-                        trashed = dbHelper.getAllTrashedMap(),
-                        stats = dbHelper.getStats(),
-                        hasUndo = dbHelper.hasUndoHistory()
-                    )
+            try {
+                val allItems = repository.getLibrary(forceRefresh = forceLibraryScan)
+                val (reviewedKeys, laterKeys, trashedMap, statsSnapshot, hasDbUndo) =
+                    withContext(dbDispatcher) {
+                        SnapshotTuple(
+                            reviewed = dbHelper.getAllReviewedKeys(),
+                            later = dbHelper.getAllLaterKeys(),
+                            trashed = dbHelper.getAllTrashedMap(),
+                            stats = dbHelper.getStats(),
+                            hasUndo = dbHelper.hasUndoHistory()
+                        )
+                    }
+
+                val stagedKeys = _stagedForDeletion.value.map { it.mediaKey }.toSet()
+                cachedReviewedKeys = reviewedKeys.toHashSet()
+                val effectiveExcluded = reviewedKeys + stagedKeys
+
+                val unreviewed = allItems.filter { !effectiveExcluded.contains(it.mediaKey) }
+                val months = repository.buildMonthProgressList(allItems, reviewedKeys)
+                val onThisDay = repository.buildOnThisDay(unreviewed)
+                val fastQuickGroups = repository.buildFastQuickCleanGroups(unreviewed)
+                val later = repository.buildLaterList(allItems, laterKeys)
+                val trashed = repository.buildTrashedList(allItems, trashedMap)
+                val deck = repository.computeDeck(allItems, groupKey, effectiveExcluded)
+
+                if (loadSeq.get() != mySeq) return@launch
+
+                _mediaDeck.value = deck
+                _monthProgressList.value = months
+                _onThisDayList.value = onThisDay
+                _quickCleanGroups.value = fastQuickGroups
+                _unreviewedSummary.value = AllLibrarySummary(
+                    count = unreviewed.size,
+                    totalSizeBytes = unreviewed.sumOf { maxOf(0L, it.sizeBytes) }
+                )
+                _laterList.value = later
+                _trashedList.value = trashed
+                _stats.value = statsSnapshot
+                _canUndo.value = sessionActionStack.isNotEmpty() || hasDbUndo
+                inFlightKeys.clear()
+                hasCompletedInitialLoad = true
+                _isLoading.value = false
+
+                // Compute visual similarity asynchronously after UI unlocks so startup never stalls on thumbnails
+                launchSimilarDetection(mySeq, unreviewed, fastQuickGroups)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                if (loadSeq.get() == mySeq) {
+                    _scanError.value = t.message ?: "Unable to read media library"
                 }
+            } finally {
+                if (loadSeq.get() == mySeq) {
+                    _isLoading.value = false
+                }
+            }
+        }
+    }
 
-            val stagedKeys = _stagedForDeletion.value.map { it.mediaKey }.toSet()
-            cachedReviewedKeys = reviewedKeys.toHashSet()
+    private fun launchSimilarDetection(
+        expectedSeq: Long,
+        unreviewedSnapshot: List<MediaItem>,
+        baseGroups: List<QuickCleanGroup>
+    ) {
+        similarJob = viewModelScope.launch {
+            val similarGroup = runCatching {
+                repository.buildSimilarQuickCleanGroup(unreviewedSnapshot)
+            }.getOrNull() ?: return@launch
 
-            val effectiveExcluded = reviewedKeys + stagedKeys
-            val deck = repository.computeDeck(allItems, groupKey, effectiveExcluded)
-            val months = repository.buildMonthProgressList(allItems, reviewedKeys)
-            val unreviewed = allItems.filter { !effectiveExcluded.contains(it.mediaKey) }
-            val onThisDay = repository.buildOnThisDay(unreviewed)
-            val quickGroups = repository.buildQuickCleanGroups(unreviewed)
-            val later = repository.buildLaterList(allItems, laterKeys)
-            val trashed = repository.buildTrashedList(allItems, trashedMap)
-
-            _mediaDeck.value = deck
-            _monthProgressList.value = months
-            _onThisDayList.value = onThisDay
-            _quickCleanGroups.value = quickGroups
-            _laterList.value = later
-            _trashedList.value = trashed
-            _stats.value = statsSnapshot
-            _canUndo.value = sessionActionStack.isNotEmpty() || hasDbUndo
-            inFlightKeys.clear()
-            _isLoading.value = false
+            if (loadSeq.get() == expectedSeq) {
+                val combined = buildList {
+                    add(similarGroup)
+                    addAll(baseGroups.filter { it.category != QuickCleanCategory.SIMILAR })
+                }
+                _quickCleanGroups.value = combined
+            }
         }
     }
 
     fun onAppResumed() {
         if (repository.consumeDirty()) {
-            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = true)
+            loadData(
+                groupKey = _activeDeckKey.value,
+                forceLibraryScan = true,
+                showSpinner = false
+            )
         } else {
             viewModelScope.launch {
                 val statsSnapshot = withContext(dbDispatcher) { dbHelper.getStats() }
@@ -149,19 +231,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun startAllItemsDeck() {
+        _activeDeckTitle.value = "All items"
+        loadData(groupKey = "ALL", forceLibraryScan = false, showSpinner = false)
+    }
+
     fun startMonthDeck(monthKey: String, monthDisplay: String) {
         _activeDeckTitle.value = monthDisplay
-        loadData(groupKey = monthKey, forceLibraryScan = false)
+        loadData(groupKey = monthKey, forceLibraryScan = false, showSpinner = false)
     }
 
     fun startQuickCleanDeck(category: QuickCleanCategory) {
         _activeDeckTitle.value = category.title
-        loadData(groupKey = category.key, forceLibraryScan = false)
+        loadData(
+            groupKey = category.key,
+            forceLibraryScan = false,
+            showSpinner = category == QuickCleanCategory.SIMILAR
+        )
     }
 
     fun startOnThisDayDeck() {
         _activeDeckTitle.value = "On this day"
-        loadData(groupKey = "ON_THIS_DAY", forceLibraryScan = false)
+        loadData(groupKey = "ON_THIS_DAY", forceLibraryScan = false, showSpinner = false)
     }
 
     fun swipeRight(item: MediaItem) {
@@ -172,6 +263,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _mediaDeck.value = _mediaDeck.value.filter { it.mediaKey != key }
         cachedReviewedKeys.add(key)
         adjustMonthProgress(item.monthYearKey, +1)
+        adjustUnreviewedSummary(-1, -item.sizeBytes)
         removeFromDerivedQuickLists(key)
         _canUndo.value = true
 
@@ -196,6 +288,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sessionActionStack.push(UndoStackItem(key, SwipeCleanDbHelper.STATUS_TRASHED, isStagedOnly = true, payload = item))
         _mediaDeck.value = _mediaDeck.value.filter { it.mediaKey != key }
         _stagedForDeletion.value = listOf(item) + _stagedForDeletion.value
+        adjustUnreviewedSummary(-1, -item.sizeBytes)
         removeFromDerivedQuickLists(key)
         _canUndo.value = true
 
@@ -213,6 +306,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _laterList.value = listOf(item) + _laterList.value
         cachedReviewedKeys.add(key)
         adjustMonthProgress(item.monthYearKey, +1)
+        adjustUnreviewedSummary(-1, -item.sizeBytes)
         removeFromDerivedQuickLists(key)
         _canUndo.value = true
 
@@ -284,6 +378,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _stagedForDeletion.value = _stagedForDeletion.value.filter { it.mediaKey != key }
                 _mediaDeck.value = listOf(item) + _mediaDeck.value
                 _showReviewDeletions.value = false
+                adjustUnreviewedSummary(+1, item.sizeBytes)
                 refreshQuickDerivedGroupsFromLibrary()
                 viewModelScope.launch {
                     val hasDbUndo = withContext(dbDispatcher) { dbHelper.hasUndoHistory() }
@@ -302,6 +397,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             cachedReviewedKeys.remove(key)
             adjustMonthProgress(item.monthYearKey, -1)
+            adjustUnreviewedSummary(+1, item.sizeBytes)
             _mediaDeck.value = listOf(item) + _mediaDeck.value
             _showReviewDeletions.value = false
             refreshQuickDerivedGroupsFromLibrary()
@@ -346,6 +442,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _mediaDeck.value = listOf(restoredItem) + _mediaDeck.value
                 }
                 adjustMonthProgress(restoredItem.monthYearKey, -1)
+                adjustUnreviewedSummary(+1, restoredItem.sizeBytes)
             }
 
             val (updatedStats, hasDbUndo) = withContext(dbDispatcher) {
@@ -396,6 +493,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _trashedList.value = _trashedList.value.filter { it.mediaItem.mediaKey != key }
         sessionActionStack.removeByKey(key)
         adjustMonthProgress(item.monthYearKey, -1)
+        adjustUnreviewedSummary(+1, item.sizeBytes)
 
         if (itemMatchesActiveDeck(item) && _mediaDeck.value.none { it.mediaKey == key }) {
             _mediaDeck.value = listOf(item) + _mediaDeck.value
@@ -431,7 +529,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             _stats.value = updatedStats
             _canUndo.value = sessionActionStack.isNotEmpty() || hasUndo
-            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = false)
+            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = false, showSpinner = false)
         }
     }
 
@@ -469,7 +567,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _toastEvents.tryEmit(message)
             }
 
-            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = true)
+            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = true, showSpinner = false)
         }
     }
 
@@ -481,7 +579,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             withContext(dbDispatcher) {
                 dbHelper.resetKeptHistory()
             }
-            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = false)
+            loadData(groupKey = _activeDeckKey.value, forceLibraryScan = false, showSpinner = false)
         }
     }
 
@@ -501,6 +599,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun adjustUnreviewedSummary(countDelta: Int, bytesDelta: Long) {
+        val current = _unreviewedSummary.value
+        _unreviewedSummary.value = AllLibrarySummary(
+            count = maxOf(0, current.count + countDelta),
+            totalSizeBytes = maxOf(0L, current.totalSizeBytes + bytesDelta)
+        )
+    }
+
     private fun removeFromDerivedQuickLists(key: MediaKey) {
         _onThisDayList.value = _onThisDayList.value.filter { it.mediaKey != key }
         refreshQuickDerivedGroupsFromLibrary()
@@ -513,7 +619,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val excluded = cachedReviewedKeys + stagedKeys
             val unreviewed = allItems.filter { !excluded.contains(it.mediaKey) }
             _onThisDayList.value = repository.buildOnThisDay(unreviewed)
-            _quickCleanGroups.value = repository.buildQuickCleanGroups(unreviewed)
+
+            val existingSimilar = _quickCleanGroups.value.firstOrNull {
+                it.category == QuickCleanCategory.SIMILAR
+            }
+            val fast = repository.buildFastQuickCleanGroups(unreviewed)
+            _quickCleanGroups.value = if (existingSimilar != null) {
+                listOf(existingSimilar) + fast
+            } else {
+                fast
+            }
         }
     }
 

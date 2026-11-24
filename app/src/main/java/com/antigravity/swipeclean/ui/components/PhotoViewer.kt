@@ -1,19 +1,30 @@
 package com.antigravity.swipeclean.ui.components
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BrokenImage
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,15 +41,19 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import coil.compose.AsyncImagePainter
+import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import coil.size.Precision
 import com.antigravity.swipeclean.data.model.MediaItem
 import com.antigravity.swipeclean.ui.theme.OledBlack
 import com.antigravity.swipeclean.ui.theme.ScrimDark
 import com.antigravity.swipeclean.ui.theme.SurfaceBase
+import com.antigravity.swipeclean.ui.theme.TextMuted
 import com.antigravity.swipeclean.ui.theme.TextPrimary
+import com.antigravity.swipeclean.ui.theme.TextSecondary
 
 @Composable
 fun PhotoViewer(
@@ -50,8 +65,10 @@ fun PhotoViewer(
 ) {
     var scale by remember(mediaItem.stableKey) { mutableFloatStateOf(1f) }
     var offset by remember(mediaItem.stableKey) { mutableStateOf(Offset.Zero) }
+    var useSoftwareFallback by remember(mediaItem.stableKey) { mutableStateOf(false) }
 
     val context = LocalContext.current
+    val decodeCapPx = if (isFullscreen) 3072 else 1600
 
     Box(
         modifier = modifier
@@ -92,13 +109,25 @@ fun PhotoViewer(
             Modifier
         }
 
-        AsyncImage(
+        val painter = rememberAsyncImagePainter(
             model = ImageRequest.Builder(context)
                 .data(mediaItem.uri)
-                .crossfade(!isFullscreen)
+                .size(decodeCapPx)
                 .precision(Precision.INEXACT)
-                .allowHardware(true)
+                .bitmapConfig(Bitmap.Config.ARGB_8888)
+                .allowHardware(!useSoftwareFallback)
+                .setParameter("sw", useSoftwareFallback)
+                .crossfade(!isFullscreen && !useSoftwareFallback)
                 .build(),
+            onError = {
+                if (!useSoftwareFallback) {
+                    useSoftwareFallback = true
+                }
+            }
+        )
+
+        Image(
+            painter = painter,
             contentDescription = mediaItem.displayName,
             contentScale = ContentScale.Fit,
             modifier = Modifier
@@ -111,6 +140,54 @@ fun PhotoViewer(
                     translationY = offset.y
                 }
         )
+
+        when (painter.state) {
+            is AsyncImagePainter.State.Loading -> {
+                CircularProgressIndicator(
+                    color = TextSecondary,
+                    strokeWidth = 2.5.dp,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+            is AsyncImagePainter.State.Error -> {
+                if (!useSoftwareFallback) {
+                    CircularProgressIndicator(
+                        color = TextSecondary,
+                        strokeWidth = 2.5.dp,
+                        modifier = Modifier.size(32.dp)
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.BrokenImage,
+                            contentDescription = "Preview unavailable",
+                            tint = TextMuted,
+                            modifier = Modifier.size(40.dp)
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Preview unavailable",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = mediaItem.displayName,
+                            color = TextMuted,
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+            else -> Unit
+        }
 
         if (showMetadata && scale == 1f) {
             Box(

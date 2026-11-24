@@ -24,11 +24,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
@@ -59,12 +64,15 @@ import com.antigravity.swipeclean.ui.theme.SurfaceElevated
 import com.antigravity.swipeclean.ui.theme.TextMuted
 import com.antigravity.swipeclean.ui.theme.TextPrimary
 import com.antigravity.swipeclean.ui.theme.TextSecondary
+import com.antigravity.swipeclean.util.formatBytes
 
 @Composable
 fun HomeScreen(
     viewModel: MainViewModel,
     isPartialAccess: Boolean,
-    onRequestFullAccess: () -> Unit,
+    onSelectMoreMedia: () -> Unit,
+    onOpenAppSettings: () -> Unit,
+    onStartAllItemsSwipe: () -> Unit,
     onStartMonthSwipe: (String, String) -> Unit,
     onStartQuickClean: (QuickCleanCategory) -> Unit,
     onStartOnThisDaySwipe: () -> Unit,
@@ -72,9 +80,11 @@ fun HomeScreen(
 ) {
     val monthList by viewModel.monthProgressList.collectAsState()
     val quickCleanGroups by viewModel.quickCleanGroups.collectAsState()
+    val unreviewedSummary by viewModel.unreviewedSummary.collectAsState()
     val onThisDayItems by viewModel.onThisDayList.collectAsState()
     val stats by viewModel.stats.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val scanError by viewModel.scanError.collectAsState()
 
     Box(
         modifier = modifier
@@ -141,6 +151,44 @@ fun HomeScreen(
                         }
                     }
                 }
+                scanError != null && monthList.isEmpty() -> {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.padding(24.dp)
+                        ) {
+                            Text(
+                                text = "Couldn't read gallery",
+                                color = TextPrimary,
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = scanError ?: "Unknown error",
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Button(
+                                onClick = { viewModel.loadData(forceLibraryScan = true, showSpinner = true) },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = TextPrimary,
+                                    contentColor = OledBlack
+                                ),
+                                modifier = Modifier.heightIn(min = 48.dp)
+                            ) {
+                                Text(text = "Retry", style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
+                    }
+                }
                 monthList.isEmpty() -> {
                     Box(
                         modifier = Modifier
@@ -159,21 +207,35 @@ fun HomeScreen(
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "Your library has no media items, or access is restricted.",
+                                text = if (isPartialAccess) {
+                                    "Only selected photos are visible. Pick photos or allow full access in system settings."
+                                } else {
+                                    "Your gallery has no indexed photos or videos."
+                                },
                                 color = TextSecondary,
-                                style = MaterialTheme.typography.bodyMedium
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center
                             )
                             if (isPartialAccess) {
-                                Spacer(modifier = Modifier.height(16.dp))
-                                TextButton(
-                                    onClick = onRequestFullAccess,
-                                    modifier = Modifier.heightIn(min = 48.dp)
-                                ) {
-                                    Text(
-                                        text = "Allow all photos and videos",
-                                        color = LaterBlue,
-                                        style = MaterialTheme.typography.labelLarge
-                                    )
+                                Spacer(modifier = Modifier.height(18.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    OutlinedButton(
+                                        onClick = onSelectMoreMedia,
+                                        border = BorderStroke(1.dp, BorderSubtle),
+                                        modifier = Modifier.heightIn(min = 48.dp)
+                                    ) {
+                                        Text("Select photos", color = TextPrimary)
+                                    }
+                                    Button(
+                                        onClick = onOpenAppSettings,
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = TextPrimary,
+                                            contentColor = OledBlack
+                                        ),
+                                        modifier = Modifier.heightIn(min = 48.dp)
+                                    ) {
+                                        Text("App settings")
+                                    }
                                 }
                             }
                         }
@@ -187,35 +249,55 @@ fun HomeScreen(
                     ) {
                         if (isPartialAccess) {
                             item(key = "partial_access_banner") {
+                                PartialAccessCard(
+                                    onSelectMore = onSelectMoreMedia,
+                                    onOpenSettings = onOpenAppSettings
+                                )
+                            }
+                        }
+
+                        if (unreviewedSummary.count > 0) {
+                            item(key = "all_items_card") {
                                 Card(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onStartAllItemsSwipe() },
+                                    shape = RoundedCornerShape(16.dp),
                                     colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
                                     border = BorderStroke(1.dp, BorderSubtle)
                                 ) {
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(start = 14.dp, top = 8.dp, bottom = 8.dp, end = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
+                                            .padding(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(
-                                            text = "Limited media access enabled",
-                                            color = TextSecondary,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            modifier = Modifier.weight(1f)
+                                        Icon(
+                                            imageVector = Icons.Default.PhotoLibrary,
+                                            contentDescription = null,
+                                            tint = TextPrimary,
+                                            modifier = Modifier.size(24.dp)
                                         )
-                                        TextButton(
-                                            onClick = onRequestFullAccess,
-                                            modifier = Modifier.heightIn(min = 48.dp)
-                                        ) {
+                                        Spacer(modifier = Modifier.width(14.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
                                             Text(
-                                                text = "Allow all",
-                                                color = LaterBlue,
-                                                style = MaterialTheme.typography.labelLarge
+                                                text = "All photos and videos",
+                                                color = TextPrimary,
+                                                style = MaterialTheme.typography.titleMedium
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = "${unreviewedSummary.count} unreviewed  ·  ${formatBytes(unreviewedSummary.totalSizeBytes)}",
+                                                color = TextSecondary,
+                                                style = MaterialTheme.typography.bodySmall
                                             )
                                         }
+                                        Icon(
+                                            imageVector = Icons.Default.ChevronRight,
+                                            contentDescription = "Open all items",
+                                            tint = TextSecondary,
+                                            modifier = Modifier.size(22.dp)
+                                        )
                                     }
                                 }
                             }
@@ -228,7 +310,7 @@ fun HomeScreen(
                                         .fillMaxWidth()
                                         .clickable { onStartOnThisDaySwipe() },
                                     shape = RoundedCornerShape(16.dp),
-                                    colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
+                                    colors = CardDefaults.cardColors(containerColor = SurfaceBase),
                                     border = BorderStroke(1.dp, BorderSubtle)
                                 ) {
                                     Row(
@@ -323,6 +405,56 @@ fun HomeScreen(
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PartialAccessCard(
+    onSelectMore: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
+        border = BorderStroke(1.dp, CautionAmber.copy(alpha = 0.4f))
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = "Limited media access",
+                color = CautionAmber,
+                style = MaterialTheme.typography.labelLarge
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Only selected photos and videos are shown. Grant 'Allow all' in app settings to clean your full gallery.",
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    onClick = onSelectMore,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) {
+                    Text(
+                        text = "Select more",
+                        color = TextPrimary,
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                }
+                TextButton(
+                    onClick = onOpenSettings,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) {
+                    Text(
+                        text = "Open settings",
+                        color = LaterBlue,
+                        style = MaterialTheme.typography.labelLarge
+                    )
                 }
             }
         }

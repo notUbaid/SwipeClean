@@ -53,6 +53,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -82,45 +83,32 @@ fun VideoPlayerView(
     val context = LocalContext.current
 
     if (!isActiveCard) {
-        Box(
+        VideoThumbnailFallback(
+            mediaItem = mediaItem,
+            isFullscreen = isFullscreen,
+            statusLabel = null,
             modifier = modifier
-                .fillMaxSize()
-                .then(if (isFullscreen) Modifier else Modifier.clip(RoundedCornerShape(20.dp)))
-                .background(if (isFullscreen) OledBlack else SurfaceBase),
-            contentAlignment = Alignment.Center
-        ) {
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(mediaItem.uri)
-                    .crossfade(true)
-                    .build(),
-                contentDescription = mediaItem.displayName,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
-            )
-            Box(
-                modifier = Modifier
-                    .size(56.dp)
-                    .background(ScrimDark, CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.PlayCircle,
-                    contentDescription = "Video preview",
-                    tint = TextPrimary,
-                    modifier = Modifier.size(34.dp)
-                )
-            }
-        }
+        )
         return
     }
 
     var isPlaying by remember(mediaItem.stableKey) { mutableStateOf(true) }
     var isMuted by remember(mediaItem.stableKey) { mutableStateOf(true) }
+    var playbackError by remember(mediaItem.stableKey) { mutableStateOf(false) }
     var currentPositionMs by remember(mediaItem.stableKey) { mutableLongStateOf(0L) }
     var totalDurationMs by remember(mediaItem.stableKey) { mutableLongStateOf(mediaItem.durationMs) }
     var isScrubbing by remember(mediaItem.stableKey) { mutableStateOf(false) }
     var scrubProgress by remember(mediaItem.stableKey) { mutableFloatStateOf(0f) }
+
+    if (playbackError) {
+        VideoThumbnailFallback(
+            mediaItem = mediaItem,
+            isFullscreen = isFullscreen,
+            statusLabel = "Preview unavailable  ·  ${mediaItem.formattedSize}",
+            modifier = modifier
+        )
+        return
+    }
 
     val exoPlayer = remember(mediaItem.stableKey) {
         ExoPlayer.Builder(context).build().apply {
@@ -150,6 +138,10 @@ fun VideoPlayerView(
 
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                playbackError = true
             }
         }
         exoPlayer.addListener(playerListener)
@@ -186,6 +178,14 @@ fun VideoPlayerView(
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     player = exoPlayer
                 }
+            },
+            update = { view ->
+                if (view.player !== exoPlayer) {
+                    view.player = exoPlayer
+                }
+            },
+            onRelease = { view ->
+                view.player = null
             },
             modifier = Modifier.fillMaxSize()
         )
@@ -342,6 +342,61 @@ fun VideoPlayerView(
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VideoThumbnailFallback(
+    mediaItem: MediaItem,
+    isFullscreen: Boolean,
+    statusLabel: String?,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .then(if (isFullscreen) Modifier else Modifier.clip(RoundedCornerShape(20.dp)))
+            .background(if (isFullscreen) OledBlack else SurfaceBase),
+        contentAlignment = Alignment.Center
+    ) {
+        AsyncImage(
+            model = ImageRequest.Builder(context)
+                .data(mediaItem.uri)
+                .crossfade(true)
+                .build(),
+            contentDescription = mediaItem.displayName,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize()
+        )
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .background(ScrimDark, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.PlayCircle,
+                contentDescription = "Video",
+                tint = TextPrimary,
+                modifier = Modifier.size(34.dp)
+            )
+        }
+        if (statusLabel != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(14.dp)
+                    .background(ScrimDark, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = statusLabel,
+                    color = TextPrimary,
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         }
     }

@@ -2,7 +2,10 @@
 -keep class androidx.media3.** { *; }
 -dontwarn androidx.media3.**
 
-# Keep Coil components
+# Keep Coil decoders & ServiceLoader targets (prevents R8 stripping VideoFrameDecoder)
+-keep class coil.decode.** { *; }
+-keep class * implements coil.util.DecoderServiceLoaderTarget { *; }
+-keep class * implements coil.util.FetcherServiceLoaderTarget { *; }
 -dontwarn coil.**
 
 # Keep SQLite helpers and data models
